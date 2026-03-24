@@ -34,4 +34,5 @@ EXPOSE 8080
 
 ENV RUST_LOG=info
 
-CMD ["precision-proxy", "--host", "0.0.0.0", "--port", "8080", "--cache-dir", "/tmp/cache", "--cache-size", "1073741824", "--frontend-dist", "./frontend/dist"]
+ENTRYPOINT ["precision-proxy"]
+CMD ["--host", "0.0.0.0", "--port", "8080", "--cache-dir", "/tmp/cache", "--frontend-dist", "./frontend/dist"]

@@ -40,7 +40,7 @@ npm run dev --workspace=frontend
 
 ```bash
 npm run build
-cargo run -- --cache-size 1073741824
+cargo run -- --cache-size 1GiB
 ```
 
 默认地址：
@@ -63,14 +63,15 @@ cargo run -- \
   --host 0.0.0.0 \
   --port 8080 \
   --cache-dir ./cache \
-  --cache-size 1073741824 \
+  --cache-size 1GiB \
   --frontend-dist ./frontend/dist
 ```
 
 说明：
 
-- `--cache-size` 为必填，单位字节
-- Docker 镜像默认内置 `1 GiB` 缓存上限
+- `--cache-size` 为必填
+- 支持纯字节或带单位的写法，如 `512MB`、`2GB`、`1GiB`
+- 容器运行时也必须显式传入 `--cache-size`
 
 ## Docker 部署
 
@@ -90,7 +91,8 @@ docker run -d \
   --restart unless-stopped \
   -p 8080:8080 \
   -v yundo-cache:/tmp/cache \
-  ghcr.io/veegn/yundo:latest
+  ghcr.io/veegn/yundo:latest \
+  --cache-size 1GiB
 ```
 
 访问地址：
@@ -110,7 +112,8 @@ docker run -d \
   --restart unless-stopped \
   -p 8080:8080 \
   -v yundo-cache:/tmp/cache \
-  ghcr.io/veegn/yundo:latest
+  ghcr.io/veegn/yundo:latest \
+  --cache-size 1GiB
 ```
 
 如果需要覆盖默认缓存大小：
@@ -125,7 +128,7 @@ docker run -d \
   --host 0.0.0.0 \
   --port 8080 \
   --cache-dir /tmp/cache \
-  --cache-size 2147483648 \
+  --cache-size 2GiB \
   --frontend-dist ./frontend/dist
 ```
 
