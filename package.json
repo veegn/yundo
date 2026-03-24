@@ -1,0 +1,13 @@
+{
+  "name": "root",
+  "private": true,
+  "workspaces": [
+    "frontend"
+  ],
+  "scripts": {
+    "dev": "npm run dev --workspace=frontend",
+    "build": "npm exec --workspace=frontend vite build",
+    "start": "cargo run",
+    "lint": "npm exec --workspace=frontend tsc --noEmit"
+  }
+}

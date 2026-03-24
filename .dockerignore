@@ -1,0 +1,11 @@
+.git
+.github
+node_modules
+frontend/node_modules
+target
+cache
+frontend/dist
+dist
+coverage
+*.log
+.DS_Store
