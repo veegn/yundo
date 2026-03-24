@@ -70,69 +70,19 @@ cargo run -- \
 说明：
 
 - `--cache-size` 为必填，单位字节
-- 默认 Docker 镜像内置 `1 GiB` 缓存上限
+- Docker 镜像默认内置 `1 GiB` 缓存上限
 
 ## Docker 部署
 
-仓库已提供：
-
-- [Dockerfile](/D:/dev/yundo/Dockerfile)
-- [.dockerignore](/D:/dev/yundo/.dockerignore)
-- [docker-image.yml](/D:/dev/yundo/.github/workflows/docker-image.yml)
-
-镜像特点：
-
-- 多阶段构建
-- Rust release 构建
-- distroless 运行层
-- SQLite bundled 静态构建
-
-本地构建镜像：
-
-```bash
-docker build -t yundo:latest .
-```
-
-本地运行镜像：
-
-```bash
-docker run --rm -p 8080:8080 yundo:latest
-```
-
-持久化缓存和数据库：
-
-```bash
-docker run --rm -p 8080:8080 -v yundo-cache:/tmp/cache yundo:latest
-```
-
-## 通过 GitHub Docker 镜像部署
-
-GitHub Actions 会自动构建并推送镜像到 GHCR：
-
-```text
-ghcr.io/<owner>/<repo>:<tag>
-```
-
-触发方式：
-
-- push 到 `master`
-- push tag，例如 `v1.0.0`
-- pull request
-- 手动触发 workflow
+仅保留 GitHub Container Registry 镜像部署方式。
 
 拉取镜像：
 
 ```bash
-docker pull ghcr.io/<owner>/<repo>:latest
+docker pull ghcr.io/veegn/yundo:latest
 ```
 
-如果镜像为私有，需要先登录：
-
-```bash
-echo <GITHUB_TOKEN> | docker login ghcr.io -u <GITHUB_USERNAME> --password-stdin
-```
-
-服务器部署：
+启动容器：
 
 ```bash
 docker run -d \
@@ -140,13 +90,19 @@ docker run -d \
   --restart unless-stopped \
   -p 8080:8080 \
   -v yundo-cache:/tmp/cache \
-  ghcr.io/<owner>/<repo>:latest
+  ghcr.io/veegn/yundo:latest
+```
+
+访问地址：
+
+```text
+http://<server-ip>:8080
 ```
 
 更新部署：
 
 ```bash
-docker pull ghcr.io/<owner>/<repo>:latest
+docker pull ghcr.io/veegn/yundo:latest
 docker stop yundo
 docker rm yundo
 docker run -d \
@@ -154,22 +110,10 @@ docker run -d \
   --restart unless-stopped \
   -p 8080:8080 \
   -v yundo-cache:/tmp/cache \
-  ghcr.io/<owner>/<repo>:latest
+  ghcr.io/veegn/yundo:latest
 ```
 
-如果要固定版本：
-
-```bash
-docker pull ghcr.io/<owner>/<repo>:v1.0.0
-docker run -d \
-  --name yundo \
-  --restart unless-stopped \
-  -p 8080:8080 \
-  -v yundo-cache:/tmp/cache \
-  ghcr.io/<owner>/<repo>:v1.0.0
-```
-
-如果要覆盖默认缓存大小：
+如果需要覆盖默认缓存大小：
 
 ```bash
 docker run -d \
@@ -177,7 +121,7 @@ docker run -d \
   --restart unless-stopped \
   -p 8080:8080 \
   -v yundo-cache:/tmp/cache \
-  ghcr.io/<owner>/<repo>:latest \
+  ghcr.io/veegn/yundo:latest \
   --host 0.0.0.0 \
   --port 8080 \
   --cache-dir /tmp/cache \
@@ -224,4 +168,4 @@ docker run -d \
 
 ## 许可证
 
-本项目使用 MIT License。见 [LICENSE](/D:/dev/yundo/LICENSE)。
+本项目使用 MIT License。见 [LICENSE](LICENSE)。
