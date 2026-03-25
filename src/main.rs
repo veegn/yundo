@@ -297,6 +297,86 @@ fn ensure_download_filename(headers: &mut HeaderMap, file_name: &str) {
     }
 }
 
+fn resolve_file_name(original_url: &Url, final_url: Option<&Url>, headers: &HeaderMap) -> String {
+    extract_filename_from_headers(headers)
+        .or_else(|| final_url.and_then(extract_filename_from_url))
+        .or_else(|| extract_filename_from_url(original_url))
+        .unwrap_or_else(|| "download.bin".to_string())
+}
+
+fn extract_filename_from_headers(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get("content-disposition")
+        .and_then(|value| value.to_str().ok())
+        .and_then(parse_content_disposition_filename)
+}
+
+fn extract_filename_from_url(url: &Url) -> Option<String> {
+    for (key, value) in url.query_pairs() {
+        let key = key.to_ascii_lowercase();
+        if (key == "response-content-disposition" || key == "rscd")
+            && parse_content_disposition_filename(&value).is_some()
+        {
+            return parse_content_disposition_filename(&value);
+        }
+    }
+
+    url.path_segments()
+        .and_then(|mut segments| segments.next_back())
+        .filter(|segment| !segment.is_empty())
+        .map(|segment| segment.to_string())
+}
+
+fn parse_content_disposition_filename(value: &str) -> Option<String> {
+    for part in value.split(';').map(str::trim) {
+        if let Some(encoded) = part.strip_prefix("filename*=") {
+            let encoded = encoded.strip_prefix("UTF-8''").unwrap_or(encoded);
+            if let Ok(decoded) = percent_decode(encoded) {
+                let sanitized = sanitize_ascii_filename(&decoded);
+                if !sanitized.is_empty() {
+                    return Some(decoded);
+                }
+            }
+        }
+
+        if let Some(name) = part.strip_prefix("filename=") {
+            let trimmed = name.trim_matches('"').trim_matches('\'').trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+    }
+
+    None
+}
+
+fn percent_decode(value: &str) -> Result<String, ()> {
+    let bytes = value.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+
+    while index < bytes.len() {
+        match bytes[index] {
+            b'%' if index + 2 < bytes.len() => {
+                let hex = std::str::from_utf8(&bytes[index + 1..index + 3]).map_err(|_| ())?;
+                let byte = u8::from_str_radix(hex, 16).map_err(|_| ())?;
+                decoded.push(byte);
+                index += 3;
+            }
+            b'+' => {
+                decoded.push(b' ');
+                index += 1;
+            }
+            byte => {
+                decoded.push(byte);
+                index += 1;
+            }
+        }
+    }
+
+    String::from_utf8(decoded).map_err(|_| ())
+}
+
 fn build_content_disposition(file_name: &str) -> String {
     let ascii_name = sanitize_ascii_filename(file_name);
     let encoded_name = percent_encode_utf8(file_name);
@@ -489,12 +569,8 @@ async fn proxy_handler(
             .into_response();
     }
 
-    let file_name = parsed_url
-        .path_segments()
-        .and_then(|mut segments| segments.next_back())
-        .filter(|segment| !segment.is_empty())
-        .unwrap_or("download.bin")
-        .to_string();
+    let initial_file_name =
+        extract_filename_from_url(&parsed_url).unwrap_or_else(|| "download.bin".to_string());
 
     let range_value = req_headers
         .get("range")
@@ -517,7 +593,7 @@ async fn proxy_handler(
         &meta_path,
         state.db.clone(),
         target_url.clone(),
-        file_name.clone(),
+        initial_file_name.clone(),
     )
     .await
     {
@@ -537,6 +613,7 @@ async fn proxy_handler(
             return (StatusCode::BAD_GATEWAY, "failed to reach target server").into_response();
         }
     };
+    let final_url = upstream_response.url().clone();
 
     let status = upstream_response.status();
     let mut response_headers = HeaderMap::new();
@@ -560,6 +637,8 @@ async fn proxy_handler(
             }
         }
     }
+
+    let file_name = resolve_file_name(&parsed_url, Some(&final_url), &response_headers);
 
     ensure_download_filename(&mut response_headers, &file_name);
     if !meta_headers.contains_key("content-disposition") {
