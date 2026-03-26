@@ -3,7 +3,7 @@ use axum::{extract::State, Json};
 use sqlx::{Row, SqlitePool};
 use std::sync::Arc;
 
-pub(crate) fn spawn_history_cleanup_task(db: SqlitePool) {
+pub fn spawn_history_cleanup_task(db: SqlitePool) {
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(tokio::time::Duration::from_secs(3600)).await;
@@ -20,9 +20,7 @@ pub(crate) fn spawn_history_cleanup_task(db: SqlitePool) {
     });
 }
 
-pub(crate) async fn history_handler(
-    State(state): State<Arc<AppState>>,
-) -> Json<Vec<HistoryItem>> {
+pub(crate) async fn history_handler(State(state): State<Arc<AppState>>) -> Json<Vec<HistoryItem>> {
     let rows = sqlx::query(
         "SELECT
             h.url,
@@ -70,7 +68,12 @@ pub(crate) async fn history_handler(
     Json(items)
 }
 
-pub(crate) async fn record_download(db: SqlitePool, url: String, file_name: String, file_size: i64) {
+pub(crate) async fn record_download(
+    db: SqlitePool,
+    url: String,
+    file_name: String,
+    file_size: i64,
+) {
     tokio::spawn(async move {
         if let Err(err) = sqlx::query(
             "INSERT INTO download_history (url, file_name, file_size, last_download_at)

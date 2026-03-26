@@ -11,7 +11,7 @@ use tower_http::{
     trace::TraceLayer,
 };
 
-pub(crate) fn build_router(state: Arc<AppState>, frontend_dist: PathBuf) -> Router {
+pub fn build_router(state: Arc<AppState>, frontend_dist: PathBuf) -> Router {
     let api_router = Router::new()
         .route("/api/proxy", get(proxy_handler).head(proxy_head_handler))
         .route("/api/recent", get(history_handler))

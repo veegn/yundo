@@ -1,12 +1,9 @@
-mod app;
-mod cache;
-mod common;
-mod history;
-mod proxy;
-
 use clap::Parser;
-use common::{initialize_cache_dir, initialize_database, parse_socket_addr, AppState, Args};
-use history::spawn_history_cleanup_task;
+use precision_proxy::{
+    app, cache,
+    common::{initialize_cache_dir, initialize_database, parse_socket_addr, AppState, Args},
+    history::spawn_history_cleanup_task,
+};
 use reqwest::Client;
 use std::sync::Arc;
 

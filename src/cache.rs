@@ -13,7 +13,7 @@ use tokio::{
 };
 use tokio_util::io::ReaderStream;
 
-pub(crate) fn spawn_cache_eviction_task(state: Arc<AppState>) {
+pub fn spawn_cache_eviction_task(state: Arc<AppState>) {
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;

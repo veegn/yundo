@@ -14,7 +14,7 @@ use std::{
 use tokio::fs;
 use url::Url;
 
-pub(crate) const ALLOWED_HEADERS: &[&str] = &[
+pub const ALLOWED_HEADERS: &[&str] = &[
     "content-type",
     "content-length",
     "content-disposition",
@@ -26,52 +26,52 @@ pub(crate) const ALLOWED_HEADERS: &[&str] = &[
 
 #[derive(Parser, Debug)]
 #[command(author, version, about)]
-pub(crate) struct Args {
+pub struct Args {
     #[arg(short, long, default_value = "./cache")]
-    pub(crate) cache_dir: PathBuf,
+    pub cache_dir: PathBuf,
 
     #[arg(short = 's', long, value_parser = parse_cache_size)]
-    pub(crate) cache_size: u64,
+    pub cache_size: u64,
 
     #[arg(long, default_value = "0.0.0.0")]
-    pub(crate) host: String,
+    pub host: String,
 
     #[arg(short, long, default_value_t = 8080)]
-    pub(crate) port: u16,
+    pub port: u16,
 
     #[arg(long, default_value = "./frontend/dist")]
-    pub(crate) frontend_dist: PathBuf,
+    pub frontend_dist: PathBuf,
 }
 
 #[derive(Deserialize)]
-pub(crate) struct ProxyQuery {
-    pub(crate) url: String,
+pub struct ProxyQuery {
+    pub url: String,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
-pub(crate) struct CacheMeta {
-    pub(crate) headers: HashMap<String, String>,
-    pub(crate) status: u16,
+pub struct CacheMeta {
+    pub headers: HashMap<String, String>,
+    pub status: u16,
 }
 
 #[derive(Serialize)]
-pub(crate) struct HistoryItem {
-    pub(crate) url: String,
-    pub(crate) file_name: String,
-    pub(crate) file_size: i64,
-    pub(crate) last_download_at: String,
-    pub(crate) count_7d: i64,
-    pub(crate) score: f64,
+pub struct HistoryItem {
+    pub url: String,
+    pub file_name: String,
+    pub file_size: i64,
+    pub last_download_at: String,
+    pub count_7d: i64,
+    pub score: f64,
 }
 
-pub(crate) struct AppState {
-    pub(crate) client: Client,
-    pub(crate) cache_dir: PathBuf,
-    pub(crate) max_cache_size: u64,
-    pub(crate) db: SqlitePool,
+pub struct AppState {
+    pub client: Client,
+    pub cache_dir: PathBuf,
+    pub max_cache_size: u64,
+    pub db: SqlitePool,
 }
 
-pub(crate) fn parse_cache_size(input: &str) -> Result<u64, String> {
+pub fn parse_cache_size(input: &str) -> Result<u64, String> {
     let trimmed = input.trim();
     if trimmed.is_empty() {
         return Err("cache size cannot be empty".to_string());
@@ -114,20 +114,20 @@ pub(crate) fn parse_cache_size(input: &str) -> Result<u64, String> {
         .ok_or_else(|| format!("cache size `{input}` is too large"))
 }
 
-pub(crate) fn parse_socket_addr(host: &str, port: u16) -> SocketAddr {
+pub fn parse_socket_addr(host: &str, port: u16) -> SocketAddr {
     let ip: IpAddr = host.parse().unwrap_or_else(|_| {
         panic!("invalid host value: {host}");
     });
     SocketAddr::new(ip, port)
 }
 
-pub(crate) async fn initialize_cache_dir(cache_dir: &Path) {
+pub async fn initialize_cache_dir(cache_dir: &Path) {
     fs::create_dir_all(cache_dir)
         .await
         .expect("failed to create cache directory");
 }
 
-pub(crate) async fn initialize_database(cache_dir: &Path) -> SqlitePool {
+pub async fn initialize_database(cache_dir: &Path) -> SqlitePool {
     let db_path = cache_dir.join("proxy.db");
     let db_url = format!("sqlite://{}?mode=rwc", db_path.display());
 
@@ -173,7 +173,7 @@ pub(crate) async fn initialize_database(cache_dir: &Path) -> SqlitePool {
     pool
 }
 
-pub(crate) fn ensure_download_filename(headers: &mut HeaderMap, file_name: &str) {
+pub fn ensure_download_filename(headers: &mut HeaderMap, file_name: &str) {
     if headers.contains_key("content-disposition") {
         return;
     }
@@ -183,7 +183,7 @@ pub(crate) fn ensure_download_filename(headers: &mut HeaderMap, file_name: &str)
     }
 }
 
-pub(crate) fn resolve_file_name(
+pub fn resolve_file_name(
     original_url: &Url,
     final_url: Option<&Url>,
     headers: &HeaderMap,
@@ -194,7 +194,7 @@ pub(crate) fn resolve_file_name(
         .unwrap_or_else(|| "download.bin".to_string())
 }
 
-pub(crate) fn extract_filename_from_url(url: &Url) -> Option<String> {
+pub fn extract_filename_from_url(url: &Url) -> Option<String> {
     for (key, value) in url.query_pairs() {
         let key = key.to_ascii_lowercase();
         if (key == "response-content-disposition" || key == "rscd")
@@ -267,7 +267,7 @@ fn percent_decode(value: &str) -> Result<String, ()> {
     String::from_utf8(decoded).map_err(|_| ())
 }
 
-pub(crate) fn build_content_disposition(file_name: &str) -> String {
+pub fn build_content_disposition(file_name: &str) -> String {
     let ascii_name = sanitize_ascii_filename(file_name);
     let encoded_name = percent_encode_utf8(file_name);
     format!("attachment; filename=\"{ascii_name}\"; filename*=UTF-8''{encoded_name}")
@@ -312,18 +312,18 @@ fn percent_encode_utf8(value: &str) -> String {
     encoded
 }
 
-pub(crate) async fn health_handler() -> &'static str {
+pub async fn health_handler() -> &'static str {
     "ok"
 }
 
-pub(crate) async fn root_handler() -> impl IntoResponse {
+pub async fn root_handler() -> impl IntoResponse {
     (
         StatusCode::OK,
         "Frontend assets are not built yet. Run `npm install` then `npm run build --workspace=frontend`, or call the API routes directly.",
     )
 }
 
-pub(crate) fn is_forbidden_host(host: &str) -> bool {
+pub fn is_forbidden_host(host: &str) -> bool {
     host == "localhost"
         || host == "::1"
         || host == "0.0.0.0"

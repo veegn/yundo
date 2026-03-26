@@ -1516,6 +1516,7 @@ dependencies = [
  "sha2",
  "sqlx",
  "sysinfo",
+ "tempfile",
  "tokio",
  "tokio-stream",
  "tokio-util",
@@ -1523,6 +1524,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "url",
+ "urlencoding",
 ]
 
 [[package]]
