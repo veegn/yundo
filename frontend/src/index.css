@@ -48,12 +48,43 @@
   --color-on-secondary-container: #fefcff;
   --color-inverse-on-surface: #edf1f9;
   --color-on-secondary: #ffffff;
+
+  /* Custom Animations */
+  --animate-float: float 6s ease-in-out infinite;
+  --animate-pulse-slow: pulse 4s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+  --animate-glow: glow 2s ease-in-out infinite alternate;
+
+  @keyframes float {
+    0%, 100% { transform: translateY(0px); }
+    50% { transform: translateY(-10px); }
+  }
+
+  @keyframes glow {
+    from { box-shadow: 0 0 5px rgba(0, 99, 31, 0.2), 0 0 10px rgba(0, 99, 31, 0.1); }
+    to { box-shadow: 0 0 20px rgba(0, 99, 31, 0.4), 0 0 30px rgba(0, 99, 31, 0.2); }
+  }
 }
 
 @layer base {
+  :root {
+    --glass-bg: rgba(255, 255, 255, 0.7);
+    --glass-border: rgba(255, 255, 255, 0.3);
+  }
+
   body {
-    font-family: 'Inter', sans-serif;
+    font-family: 'Inter', system-ui, -apple-system, sans-serif;
     -webkit-font-smoothing: antialiased;
+    background-color: var(--color-background);
+    color: var(--color-on-background);
+    background-image: 
+      radial-gradient(at 0% 0%, rgba(151, 249, 153, 0.15) 0px, transparent 50%),
+      radial-gradient(at 100% 0%, rgba(173, 198, 255, 0.15) 0px, transparent 50%);
+    background-attachment: fixed;
+  }
+
+  h1, h2, h3, h4, .font-display {
+    font-family: 'Outfit', 'Inter', sans-serif;
+    letter-spacing: -0.02em;
   }
 }
 
@@ -64,7 +95,21 @@
   }
 
   .bg-primary-gradient {
-    background: linear-gradient(180deg, #177e2f 0%, #00631f 100%);
+    background: linear-gradient(135deg, #177e2f 0%, #00631f 100%);
+  }
+
+  .text-gradient {
+    background: linear-gradient(135deg, #00631f 0%, #0058bb 100%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }
+
+  .glass {
+    background: var(--glass-bg);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border: 1px solid var(--glass-border);
   }
 
   .ghost-border {
@@ -72,10 +117,24 @@
   }
 
   .ghost-shadow {
-    box-shadow: 0 10px 40px rgba(23, 28, 34, 0.06);
+    box-shadow: 0 10px 40px rgba(23, 28, 34, 0.04);
+  }
+
+  .premium-shadow {
+    box-shadow: 0 20px 50px rgba(0, 0, 0, 0.05);
   }
 
   .tabular-nums {
     font-variant-numeric: tabular-nums;
   }
+
+  .card-hover {
+    transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  }
+
+  .card-hover:hover {
+    transform: translateY(-4px);
+    box-shadow: 0 12px 30px rgba(23, 28, 34, 0.08);
+  }
 }
+

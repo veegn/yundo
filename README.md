@@ -10,9 +10,9 @@ Yundo 是一个下载代理和下载历史看板项目。
 ## 功能
 
 - 代理下载远程 `HTTP/HTTPS` 文件
-- 记录最近下载历史
+- 支持 `HEAD` 探测和 `Range` 断点续传
 - 本地磁盘缓存
-- 7 天下载热度统计
+- 下载历史记录与 7 天热度排序
 - 基础 SSRF 拦截
 
 ## 本地运行
@@ -30,7 +30,7 @@ npm install
 cargo build
 ```
 
-开发前端：
+前端开发：
 
 ```bash
 npm run dev --workspace=frontend
@@ -43,13 +43,13 @@ npm run build
 cargo run -- --cache-size 1GiB
 ```
 
-默认地址：
+默认访问地址：
 
 ```text
 http://127.0.0.1:8080
 ```
 
-常用路径：
+常用路由：
 
 - `/`
 - `/healthz`
@@ -70,7 +70,7 @@ cargo run -- \
 说明：
 
 - `--cache-size` 为必填
-- 支持纯字节或带单位的写法，如 `512MB`、`2GB`、`1GiB`
+- 支持纯字节和带单位写法，例如 `512MB`、`2GB`、`1GiB`
 - 容器运行时也必须显式传入 `--cache-size`
 
 ## Docker 部署
@@ -116,7 +116,7 @@ docker run -d \
   --cache-size 1GiB
 ```
 
-如果需要覆盖默认缓存大小：
+覆盖缓存大小示例：
 
 ```bash
 docker run -d \
@@ -125,11 +125,7 @@ docker run -d \
   -p 8080:8080 \
   -v yundo-cache:/tmp/cache \
   ghcr.io/veegn/yundo:latest \
-  --host 0.0.0.0 \
-  --port 8080 \
-  --cache-dir /tmp/cache \
-  --cache-size 2GiB \
-  --frontend-dist ./frontend/dist
+  --cache-size 2GiB
 ```
 
 ## API
@@ -150,6 +146,7 @@ docker run -d \
 
 - 只允许 `http` 和 `https`
 - 支持透传 `Range`
+- `Range` 请求会绕过缓存
 - 会尽量保持源文件名
 
 ### `GET /api/recent`
@@ -169,6 +166,6 @@ docker run -d \
 
 - `GET /api/history`
 
-## 许可证
+## License
 
 本项目使用 MIT License。见 [LICENSE](LICENSE)。

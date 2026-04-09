@@ -1,10 +1,17 @@
 import { useEffect, useState } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
+import { useSeo } from '../utils/seo';
 
 export default function NotFound() {
   const navigate = useNavigate();
   const location = useLocation();
   const [countdown, setCountdown] = useState(5);
+
+  useSeo({
+    title: '404 - 页面不存在 | 云渡',
+    description: '你访问的页面不存在，将在 5 秒后返回云渡首页。',
+    robots: 'noindex,nofollow',
+  });
 
   useEffect(() => {
     const interval = window.setInterval(() => {

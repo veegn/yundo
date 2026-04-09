@@ -32,6 +32,109 @@ async fn parse_cache_size_supports_human_readable_units() {
 }
 
 #[tokio::test]
+async fn robots_txt_disallows_api_and_points_to_sitemap() {
+    let cache_dir = TempDir::new().unwrap();
+    let app = spawn_proxy_server(cache_dir.path().to_path_buf(), "127.0.0.1:9".parse().unwrap()).await;
+
+    let response = Client::new()
+        .get(format!("http://{app}/robots.txt"))
+        .header("Host", "seo.example.com")
+        .header("X-Forwarded-Proto", "https")
+        .send()
+        .await
+        .unwrap();
+
+    let body = response.text().await.unwrap();
+    assert!(body.contains("Disallow: /api/"));
+    assert!(body.contains("Sitemap: https://seo.example.com/sitemap.xml"));
+    assert!(body.contains("Allow: /downloads"));
+}
+
+#[tokio::test]
+async fn sitemap_xml_uses_forwarded_host() {
+    let cache_dir = TempDir::new().unwrap();
+    let app = spawn_proxy_server(cache_dir.path().to_path_buf(), "127.0.0.1:9".parse().unwrap()).await;
+
+    let response = Client::new()
+        .get(format!("http://{app}/sitemap.xml"))
+        .header("Host", "seo.example.com")
+        .header("X-Forwarded-Proto", "https")
+        .send()
+        .await
+        .unwrap();
+
+    let body = response.text().await.unwrap();
+    assert!(body.contains("<loc>https://seo.example.com/</loc>"));
+    assert!(body.contains("<loc>https://seo.example.com/proxydash</loc>"));
+    assert!(body.contains("<loc>https://seo.example.com/downloads</loc>"));
+}
+
+#[tokio::test]
+async fn sitemap_and_detail_page_include_history_resource() {
+    let cache_dir = TempDir::new().unwrap();
+    let upstream_hits = Arc::new(AtomicUsize::new(0));
+    let upstream = spawn_upstream_server(upstream_hits).await;
+    let app = spawn_proxy_server(cache_dir.path().to_path_buf(), upstream).await;
+    let client = Client::new();
+
+    let proxy_url = format!(
+        "http://{}/api/proxy?url={}",
+        app,
+        urlencoding::encode("http://upstream.test/file")
+    );
+    let download_response = client.get(&proxy_url).send().await.unwrap();
+    assert_eq!(download_response.status(), StatusCode::OK);
+
+    sleep(Duration::from_millis(200)).await;
+
+    let history_text = client
+        .get(format!("http://{app}/api/recent"))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    let history: serde_json::Value = serde_json::from_str(&history_text).unwrap();
+    let slug = history[0]["slug"].as_str().unwrap();
+
+    let sitemap = client
+        .get(format!("http://{app}/sitemap.xml"))
+        .header("Host", "seo.example.com")
+        .header("X-Forwarded-Proto", "https")
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(sitemap.contains(&format!(
+        "<loc>https://seo.example.com/downloads/{slug}</loc>"
+    )));
+
+    let detail = client
+        .get(format!("http://{app}/downloads/{slug}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(detail.status(), StatusCode::OK);
+    let html = detail.text().await.unwrap();
+    assert!(html.contains("下载资源详情"));
+    assert!(html.contains("abcdef") || html.contains("file"));
+    assert!(html.contains("/api/proxy?url=http%3A%2F%2Fupstream.test%2Ffile"));
+
+    let resources = client
+        .get(format!("http://{app}/downloads"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resources.status(), StatusCode::OK);
+    let resources_html = resources.text().await.unwrap();
+    assert!(resources_html.contains("下载资源列表"));
+    assert!(resources_html.contains(&format!("/downloads/{slug}")));
+}
+
+#[tokio::test]
 async fn proxy_head_returns_filename_from_signed_url_query() {
     let cache_dir = TempDir::new().unwrap();
     let upstream = spawn_upstream_server(Arc::new(AtomicUsize::new(0))).await;

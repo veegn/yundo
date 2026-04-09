@@ -43,16 +43,22 @@ pub(crate) async fn enforce_cache_size(cache_dir: &Path, max_size: u64) -> std::
         return Ok(());
     }
 
+    // Only evict cache data files — never touch proxy.db or other non-cache files.
+    files.retain(|(path, _, _)| {
+        path.extension().map_or(false, |ext| ext == "data")
+    });
     files.sort_by_key(|(_, _, modified)| *modified);
 
-    for (path, size, _) in files {
+    for (path, size, _) in &files {
         if total_size <= max_size {
             break;
         }
-
-        if fs::remove_file(&path).await.is_ok() {
-            total_size -= size;
+        // Remove the data file and its associated meta file together.
+        let meta_path = path.with_extension("meta");
+        if fs::remove_file(path).await.is_ok() {
+            total_size = total_size.saturating_sub(*size);
         }
+        let _ = fs::remove_file(&meta_path).await;
     }
 
     Ok(())

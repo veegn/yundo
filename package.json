@@ -6,8 +6,8 @@
   ],
   "scripts": {
     "dev": "npm run dev --workspace=frontend",
-    "build": "npm exec --workspace=frontend vite build",
-    "start": "cargo run",
-    "lint": "npm exec --workspace=frontend tsc --noEmit"
+    "build": "npm run build --workspace=frontend",
+    "start": "cargo run -- --cache-size 1GiB",
+    "lint": "npm run lint --workspace=frontend"
   }
 }
