@@ -1,5 +1,8 @@
-use crate::common::AppState;
 use super::db::{load_ranked_history_items, to_history_item, RankedHistoryItem, SearchQuery};
+use crate::{
+    common::AppState,
+    seo::{derive_base_url, derive_external_base_path, prefix_path},
+};
 use axum::{
     extract::{Path, Query, State},
     http::{header, HeaderMap, StatusCode},
@@ -9,13 +12,7 @@ use axum::{
 use std::sync::Arc;
 use url::Url;
 
-// ---------------------------------------------------------------------------
-// API handler (JSON)
-// ---------------------------------------------------------------------------
-
-pub async fn history_handler(
-    State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
+pub async fn history_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     Json(
         load_ranked_history_items(&state.db, None)
             .await
@@ -25,10 +22,6 @@ pub async fn history_handler(
     )
 }
 
-// ---------------------------------------------------------------------------
-// SSR handlers (HTML)
-// ---------------------------------------------------------------------------
-
 pub async fn resources_index_handler(
     State(state): State<Arc<AppState>>,
     Query(query): Query<SearchQuery>,
@@ -36,13 +29,25 @@ pub async fn resources_index_handler(
 ) -> impl IntoResponse {
     let items = load_ranked_history_items(&state.db, query.q.as_deref()).await;
     let query_val = query.q.unwrap_or_default();
-    let base_url = crate::seo::derive_base_url(&headers);
+    let base_url = derive_base_url(&headers, &state.base_path);
+    let base_path = derive_external_base_path(&headers, &state.base_path);
+    let home_path = prefix_path(&base_path, "/");
+    let proxydash_path = prefix_path(&base_path, "/proxydash");
+    let downloads_path = prefix_path(&base_path, "/downloads");
+
     let cards = items
         .iter()
         .map(|item| {
+            let detail_path = prefix_path(&base_path, &format!("/downloads/{}", item.slug));
+            let download_path = format!(
+                "{}?url={}",
+                prefix_path(&base_path, "/api/proxy"),
+                percent_encode_url(&item.url)
+            );
+
             format!(
                 r#"<article class="item-card">
-  <h2><a href="/downloads/{slug}">{file_name}</a></h2>
+  <h2><a href="{detail_path}">{file_name}</a></h2>
   <p>{description}</p>
   <div class="meta">
     <span>{file_size}</span>
@@ -50,17 +55,17 @@ pub async fn resources_index_handler(
     <span>{last_download_at}</span>
   </div>
   <div class="actions">
-    <a class="primary" href="/downloads/{slug}">查看详情</a>
-    <a class="secondary" href="/api/proxy?url={encoded_url}">直接下载</a>
+    <a class="primary" href="{detail_path}">查看详情</a>
+    <a class="secondary" href="{download_path}">直接下载</a>
   </div>
 </article>"#,
-                slug = item.slug,
+                detail_path = detail_path,
                 file_name = html_escape(&item.file_name),
                 description = html_escape(&resource_description(item)),
                 file_size = human_file_size(item.file_size),
                 count_7d = item.count_7d,
                 last_download_at = html_escape(&item.last_download_at),
-                encoded_url = percent_encode_url(&item.url),
+                download_path = download_path,
             )
         })
         .collect::<Vec<_>>()
@@ -147,12 +152,6 @@ pub async fn resources_index_handler(
         color: #171c22;
         font-size: 16px;
         outline: none;
-        transition: all 0.2s;
-      }}
-      .search-box input:focus {{
-        border-color: #0058bb;
-        background: #fff;
-        box-shadow: 0 0 0 4px rgba(0, 88, 187, 0.1);
       }}
       .search-box button {{
         position: absolute;
@@ -166,10 +165,6 @@ pub async fn resources_index_handler(
         border-radius: 10px;
         font-weight: 700;
         cursor: pointer;
-        transition: opacity 0.2s;
-      }}
-      .search-box button:hover {{
-        opacity: 0.9;
       }}
       .grid {{
         display: grid;
@@ -214,8 +209,6 @@ pub async fn resources_index_handler(
         color: #0058bb;
         font-size: 12px;
         font-weight: 700;
-        word-break: break-all;
-        overflow-wrap: anywhere;
       }}
       .actions {{
         display: flex;
@@ -245,13 +238,13 @@ pub async fn resources_index_handler(
   <body>
     <main class="page">
       <div class="topbar">
-        <a class="brand" href="/">云渡</a>
-        <a class="back" href="/proxydash">历史记录</a>
+        <a class="brand" href="{home_path}">云渡</a>
+        <a class="back" href="{proxydash_path}">历史记录</a>
       </div>
       <section class="hero">
         <h1>下载资源列表</h1>
         <p>这里展示站点当前可索引的热门下载资源。每个条目都提供稳定详情页、下载代理入口和基础文件信息。</p>
-        <form class="search-box" action="/downloads" method="GET">
+        <form class="search-box" action="{downloads_path}" method="GET">
           <input type="text" name="q" placeholder="搜索已加速的资源文件名..." value="{query_val}" autocomplete="off">
           <button type="submit">搜索</button>
         </form>
@@ -261,7 +254,13 @@ pub async fn resources_index_handler(
       </section>
     </main>
   </body>
-</html>"#
+</html>"#,
+        base_url = base_url,
+        home_path = home_path,
+        proxydash_path = proxydash_path,
+        downloads_path = downloads_path,
+        query_val = html_escape(&query_val),
+        cards = cards
     );
 
     (
@@ -269,6 +268,7 @@ pub async fn resources_index_handler(
         [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
         html,
     )
+        .into_response()
 }
 
 pub async fn resource_detail_handler(
@@ -277,27 +277,33 @@ pub async fn resource_detail_handler(
     headers: HeaderMap,
 ) -> impl IntoResponse {
     let items = load_ranked_history_items(&state.db, None).await;
+    let base_path = derive_external_base_path(&headers, &state.base_path);
+
     let Some(item) = items.iter().find(|item| item.slug == slug) else {
         return (
             StatusCode::NOT_FOUND,
             [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
-            render_missing_resource_page(),
+            render_missing_resource_page(&base_path),
         )
             .into_response();
     };
 
-    let base_url = crate::seo::derive_base_url(&headers);
+    let base_url = derive_base_url(&headers, &state.base_path);
     let canonical = format!("{base_url}/downloads/{}", item.slug);
-    let proxy_url = format!("/api/proxy?url={}", percent_encode_url(&item.url));
-    let source_host = source_host(&item.url);
+    let proxy_url = format!(
+        "{}?url={}",
+        prefix_path(&base_path, "/api/proxy"),
+        percent_encode_url(&item.url)
+    );
     let related_links = items
         .iter()
         .filter(|candidate| candidate.slug != item.slug)
         .take(5)
         .map(|candidate| {
+            let detail_path = prefix_path(&base_path, &format!("/downloads/{}", candidate.slug));
             format!(
-                r#"<li><a href="/downloads/{slug}">{name}</a></li>"#,
-                slug = candidate.slug,
+                r#"<li><a href="{detail_path}">{name}</a></li>"#,
+                detail_path = detail_path,
                 name = html_escape(&candidate.file_name)
             )
         })
@@ -359,7 +365,9 @@ pub async fn resource_detail_handler(
         border-radius: 24px;
         box-shadow: 0 24px 80px rgba(23, 28, 34, 0.08);
       }}
-      .main-card {{ padding: 32px; }}
+      .main-card {{
+        padding: 32px;
+      }}
       .eyebrow {{
         display: inline-flex;
         padding: 6px 12px;
@@ -405,7 +413,11 @@ pub async fn resource_detail_handler(
         text-transform: uppercase;
         letter-spacing: 0.08em;
       }}
-      .actions {{ display: flex; gap: 12px; flex-wrap: wrap; }}
+      .actions {{
+        display: flex;
+        gap: 12px;
+        flex-wrap: wrap;
+      }}
       .button {{
         display: inline-flex;
         align-items: center;
@@ -428,13 +440,35 @@ pub async fn resource_detail_handler(
         text-decoration: none;
         font-weight: 700;
       }}
-      .side-card {{ padding: 28px; }}
-      .side-card h2 {{ margin: 0 0 14px; font-size: 18px; }}
-      .side-card p {{ margin: 0 0 14px; color: #424753; line-height: 1.7; }}
-      .side-card ul {{ margin: 0; padding-left: 18px; }}
-      .side-card li + li {{ margin-top: 10px; }}
-      .side-card a {{ color: #0058bb; text-decoration: none; }}
-      .fine-print {{ margin-top: 24px; color: #5f6671; font-size: 14px; line-height: 1.8; }}
+      .side-card {{
+        padding: 28px;
+      }}
+      .side-card h2 {{
+        margin: 0 0 14px;
+        font-size: 18px;
+      }}
+      .side-card p {{
+        margin: 0 0 14px;
+        color: #424753;
+        line-height: 1.7;
+      }}
+      .side-card ul {{
+        margin: 0;
+        padding-left: 18px;
+      }}
+      .side-card li + li {{
+        margin-top: 10px;
+      }}
+      .side-card a {{
+        color: #0058bb;
+        text-decoration: none;
+      }}
+      .fine-print {{
+        margin-top: 24px;
+        color: #5f6671;
+        font-size: 14px;
+        line-height: 1.8;
+      }}
       code {{
         display: inline-block;
         max-width: 100%;
@@ -445,15 +479,17 @@ pub async fn resource_detail_handler(
         color: #0058bb;
       }}
       @media (max-width: 860px) {{
-        .hero {{ grid-template-columns: 1fr; }}
+        .hero {{
+          grid-template-columns: 1fr;
+        }}
       }}
     </style>
   </head>
   <body>
     <main class="page">
       <div class="topbar">
-        <a class="brand" href="/">云渡</a>
-        <a class="back" href="/downloads">查看资源列表</a>
+        <a class="brand" href="{home_path}">云渡</a>
+        <a class="back" href="{downloads_path}">查看资源列表</a>
       </div>
       <section class="hero">
         <article class="card main-card">
@@ -500,13 +536,15 @@ pub async fn resource_detail_handler(
         title = html_escape(&item.file_name),
         description = html_escape(&resource_description(item)),
         canonical = canonical,
+        home_path = prefix_path(&base_path, "/"),
+        downloads_path = prefix_path(&base_path, "/downloads"),
         file_name = html_escape(&item.file_name),
         file_size = human_file_size(item.file_size),
         count_7d = item.count_7d,
         last_download_at = html_escape(&item.last_download_at),
         proxy_url = proxy_url,
         original_url = html_escape(&item.url),
-        source_host = html_escape(&source_host),
+        source_host = html_escape(&source_host(&item.url)),
         related_links = related_links
     );
 
@@ -517,10 +555,6 @@ pub async fn resource_detail_handler(
     )
         .into_response()
 }
-
-// ---------------------------------------------------------------------------
-// Private rendering helpers
-// ---------------------------------------------------------------------------
 
 fn resource_description(item: &RankedHistoryItem) -> String {
     format!(
@@ -543,7 +577,7 @@ fn human_file_size(size: i64) -> String {
     const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
     let mut value = size.max(0) as f64;
     let mut unit = 0;
-    // Use SI (1000-based) to match the frontend formatBytes utility.
+
     while value >= 1000.0 && unit < UNITS.len() - 1 {
         value /= 1000.0;
         unit += 1;
@@ -556,8 +590,9 @@ fn human_file_size(size: i64) -> String {
     }
 }
 
-fn render_missing_resource_page() -> String {
-    r#"<!doctype html>
+fn render_missing_resource_page(base_path: &str) -> String {
+    format!(
+        r#"<!doctype html>
 <html lang="zh-CN">
   <head>
     <meta charset="utf-8" />
@@ -569,11 +604,12 @@ fn render_missing_resource_page() -> String {
     <main style="max-width: 640px; margin: 0 auto; background: #fff; border-radius: 20px; padding: 32px;">
       <h1>资源不存在</h1>
       <p>该下载资源当前没有历史记录，可能尚未被创建，或已从站点中移除。</p>
-      <p><a href="/" style="color: #0058bb; font-weight: 700; text-decoration: none;">返回首页</a></p>
+      <p><a href="{home_path}" style="color: #0058bb; font-weight: 700; text-decoration: none;">返回首页</a></p>
     </main>
   </body>
-</html>"#
-        .to_string()
+</html>"#,
+        home_path = prefix_path(base_path, "/")
+    )
 }
 
 fn percent_encode_url(input: &str) -> String {

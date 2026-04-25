@@ -1,4 +1,5 @@
 import { useEffect } from 'react';
+import { withBasePath } from './basePath';
 
 type SeoOptions = {
   title: string;
@@ -18,7 +19,9 @@ export function useSeo({
   keywords,
 }: SeoOptions) {
   useEffect(() => {
-    const canonicalUrl = `${window.location.origin}${canonicalPath ?? window.location.pathname}`;
+    const canonicalUrl = canonicalPath
+      ? `${window.location.origin}${withBasePath(canonicalPath)}`
+      : `${window.location.origin}${window.location.pathname}${window.location.search}`;
     document.title = title;
 
     setMeta('name', 'description', description);

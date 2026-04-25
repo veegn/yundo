@@ -19,6 +19,9 @@ pub struct Args {
 
     #[arg(long, default_value = "./frontend/dist")]
     pub frontend_dist: PathBuf,
+
+    #[arg(long, default_value = "/", value_parser = normalize_base_path)]
+    pub base_path: String,
 }
 
 pub fn parse_cache_size(input: &str) -> Result<u64, String> {
@@ -69,4 +72,27 @@ pub fn parse_socket_addr(host: &str, port: u16) -> SocketAddr {
         panic!("invalid host value: {host}");
     });
     SocketAddr::new(ip, port)
+}
+
+pub fn normalize_base_path(input: &str) -> Result<String, String> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Ok("/".to_string());
+    }
+
+    let mut path = if trimmed.starts_with('/') {
+        trimmed.to_string()
+    } else {
+        format!("/{trimmed}")
+    };
+
+    while path.len() > 1 && path.ends_with('/') {
+        path.pop();
+    }
+
+    if path.contains('?') || path.contains('#') {
+        return Err("base path cannot contain query string or fragment".to_string());
+    }
+
+    Ok(path)
 }

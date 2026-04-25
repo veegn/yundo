@@ -19,6 +19,7 @@ async fn main() {
     tracing::info!("cache_dir = {}", args.cache_dir.display());
     tracing::info!("frontend_dist = {}", args.frontend_dist.display());
     tracing::info!("max_cache_size = {}", max_cache_size);
+    tracing::info!("base_path = {}", args.base_path);
 
     let client = Client::builder()
         .timeout(std::time::Duration::from_secs(300))
@@ -31,6 +32,8 @@ async fn main() {
         cache_dir: args.cache_dir.clone(),
         max_cache_size,
         db: db.clone(),
+        frontend_dist: args.frontend_dist.clone(),
+        base_path: args.base_path.clone(),
     });
 
     cache::spawn_cache_eviction_task(state.clone());

@@ -1,17 +1,15 @@
-/**
- * @license
- * SPDX-License-Identifier: Apache-2.0
- */
-
 import { BrowserRouter, Routes, Route } from 'react-router-dom';
 import Layout from './components/Layout';
 import Dashboard from './pages/Dashboard';
 import ProxyDash from './pages/ProxyDash';
 import NotFound from './pages/NotFound';
+import { getBasePath } from './utils/basePath';
 
 export default function App() {
+  const basePath = getBasePath();
+
   return (
-    <BrowserRouter>
+    <BrowserRouter basename={basePath === '/' ? undefined : basePath}>
       <Routes>
         <Route path="/" element={<Layout />}>
           <Route index element={<Dashboard />} />

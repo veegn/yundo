@@ -34,7 +34,12 @@ async fn parse_cache_size_supports_human_readable_units() {
 #[tokio::test]
 async fn robots_txt_disallows_api_and_points_to_sitemap() {
     let cache_dir = TempDir::new().unwrap();
-    let app = spawn_proxy_server(cache_dir.path().to_path_buf(), "127.0.0.1:9".parse().unwrap()).await;
+    let app = spawn_proxy_server(
+        cache_dir.path().to_path_buf(),
+        "127.0.0.1:9".parse().unwrap(),
+        "/".to_string(),
+    )
+    .await;
 
     let response = Client::new()
         .get(format!("http://{app}/robots.txt"))
@@ -53,7 +58,12 @@ async fn robots_txt_disallows_api_and_points_to_sitemap() {
 #[tokio::test]
 async fn sitemap_xml_uses_forwarded_host() {
     let cache_dir = TempDir::new().unwrap();
-    let app = spawn_proxy_server(cache_dir.path().to_path_buf(), "127.0.0.1:9".parse().unwrap()).await;
+    let app = spawn_proxy_server(
+        cache_dir.path().to_path_buf(),
+        "127.0.0.1:9".parse().unwrap(),
+        "/".to_string(),
+    )
+    .await;
 
     let response = Client::new()
         .get(format!("http://{app}/sitemap.xml"))
@@ -70,11 +80,35 @@ async fn sitemap_xml_uses_forwarded_host() {
 }
 
 #[tokio::test]
+async fn sitemap_respects_forwarded_prefix() {
+    let cache_dir = TempDir::new().unwrap();
+    let app = spawn_proxy_server(
+        cache_dir.path().to_path_buf(),
+        "127.0.0.1:9".parse().unwrap(),
+        "/".to_string(),
+    )
+    .await;
+
+    let response = Client::new()
+        .get(format!("http://{app}/sitemap.xml"))
+        .header("Host", "seo.example.com")
+        .header("X-Forwarded-Proto", "https")
+        .header("X-Forwarded-Prefix", "/tools/yundo")
+        .send()
+        .await
+        .unwrap();
+
+    let body = response.text().await.unwrap();
+    assert!(body.contains("<loc>https://seo.example.com/tools/yundo/</loc>"));
+    assert!(body.contains("<loc>https://seo.example.com/tools/yundo/downloads</loc>"));
+}
+
+#[tokio::test]
 async fn sitemap_and_detail_page_include_history_resource() {
     let cache_dir = TempDir::new().unwrap();
     let upstream_hits = Arc::new(AtomicUsize::new(0));
     let upstream = spawn_upstream_server(upstream_hits).await;
-    let app = spawn_proxy_server(cache_dir.path().to_path_buf(), upstream).await;
+    let app = spawn_proxy_server(cache_dir.path().to_path_buf(), upstream, "/".to_string()).await;
     let client = Client::new();
 
     let proxy_url = format!(
@@ -138,7 +172,7 @@ async fn sitemap_and_detail_page_include_history_resource() {
 async fn proxy_head_returns_filename_from_signed_url_query() {
     let cache_dir = TempDir::new().unwrap();
     let upstream = spawn_upstream_server(Arc::new(AtomicUsize::new(0))).await;
-    let app = spawn_proxy_server(cache_dir.path().to_path_buf(), upstream).await;
+    let app = spawn_proxy_server(cache_dir.path().to_path_buf(), upstream, "/".to_string()).await;
 
     let mut signed_url = Url::parse("http://upstream.test/file").unwrap();
     signed_url
@@ -175,7 +209,7 @@ async fn full_download_requests_are_served_from_cache() {
     let cache_dir = TempDir::new().unwrap();
     let upstream_hits = Arc::new(AtomicUsize::new(0));
     let upstream = spawn_upstream_server(upstream_hits.clone()).await;
-    let app = spawn_proxy_server(cache_dir.path().to_path_buf(), upstream).await;
+    let app = spawn_proxy_server(cache_dir.path().to_path_buf(), upstream, "/".to_string()).await;
 
     let proxy_url = format!(
         "http://{}/api/proxy?url={}",
@@ -203,7 +237,7 @@ async fn range_requests_bypass_cache() {
     let cache_dir = TempDir::new().unwrap();
     let upstream_hits = Arc::new(AtomicUsize::new(0));
     let upstream = spawn_upstream_server(upstream_hits.clone()).await;
-    let app = spawn_proxy_server(cache_dir.path().to_path_buf(), upstream).await;
+    let app = spawn_proxy_server(cache_dir.path().to_path_buf(), upstream, "/".to_string()).await;
 
     let proxy_url = format!(
         "http://{}/api/proxy?url={}",
@@ -236,7 +270,43 @@ async fn range_requests_bypass_cache() {
     assert_eq!(count_cache_data_files(cache_dir.path()).await, 0);
 }
 
-async fn spawn_proxy_server(cache_dir: PathBuf, upstream_addr: SocketAddr) -> SocketAddr {
+#[tokio::test]
+async fn configured_base_path_mounts_routes_under_prefix() {
+    let cache_dir = TempDir::new().unwrap();
+    let upstream_hits = Arc::new(AtomicUsize::new(0));
+    let upstream = spawn_upstream_server(upstream_hits).await;
+    let app = spawn_proxy_server(cache_dir.path().to_path_buf(), upstream, "/tools/yundo".to_string()).await;
+    let client = Client::new();
+
+    let proxy_url = format!(
+        "http://{}/tools/yundo/api/proxy?url={}",
+        app,
+        urlencoding::encode("http://upstream.test/file")
+    );
+    let download_response = client.get(&proxy_url).send().await.unwrap();
+    assert_eq!(download_response.status(), StatusCode::OK);
+
+    sleep(Duration::from_millis(200)).await;
+
+    let history_response = client
+        .get(format!("http://{app}/tools/yundo/api/recent"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(history_response.status(), StatusCode::OK);
+
+    let resources_response = client
+        .get(format!("http://{app}/tools/yundo/downloads"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resources_response.status(), StatusCode::OK);
+
+    let missing_root = client.get(format!("http://{app}/downloads")).send().await.unwrap();
+    assert_eq!(missing_root.status(), StatusCode::NOT_FOUND);
+}
+
+async fn spawn_proxy_server(cache_dir: PathBuf, upstream_addr: SocketAddr, base_path: String) -> SocketAddr {
     initialize_cache_dir(&cache_dir).await;
     let db = initialize_database(&cache_dir).await;
     let state = Arc::new(AppState {
@@ -248,6 +318,8 @@ async fn spawn_proxy_server(cache_dir: PathBuf, upstream_addr: SocketAddr) -> So
         cache_dir,
         max_cache_size: 64 * 1024 * 1024,
         db,
+        frontend_dist: PathBuf::from("./frontend/missing-dist"),
+        base_path,
     });
 
     let router = build_router(state, PathBuf::from("./frontend/missing-dist"));
@@ -262,7 +334,10 @@ async fn spawn_upstream_server(hit_count: Arc<AtomicUsize>) -> SocketAddr {
         let mut response_headers = HeaderMap::new();
         response_headers.insert("accept-ranges", HeaderValue::from_static("bytes"));
         response_headers.insert("etag", HeaderValue::from_static("\"test-etag\""));
-        response_headers.insert("last-modified", HeaderValue::from_static("Wed, 26 Mar 2026 10:00:00 GMT"));
+        response_headers.insert(
+            "last-modified",
+            HeaderValue::from_static("Wed, 26 Mar 2026 10:00:00 GMT"),
+        );
 
         if let Some(range) = headers.get("range").and_then(|value| value.to_str().ok()) {
             if range == "bytes=1-3" {
@@ -280,7 +355,10 @@ async fn spawn_upstream_server(hit_count: Arc<AtomicUsize>) -> SocketAddr {
         let mut response_headers = HeaderMap::new();
         response_headers.insert("accept-ranges", HeaderValue::from_static("bytes"));
         response_headers.insert("etag", HeaderValue::from_static("\"test-etag\""));
-        response_headers.insert("last-modified", HeaderValue::from_static("Wed, 26 Mar 2026 10:00:00 GMT"));
+        response_headers.insert(
+            "last-modified",
+            HeaderValue::from_static("Wed, 26 Mar 2026 10:00:00 GMT"),
+        );
         response_headers.insert("content-length", HeaderValue::from_static("6"));
         (StatusCode::OK, response_headers)
     }

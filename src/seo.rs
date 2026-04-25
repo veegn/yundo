@@ -1,7 +1,4 @@
-use crate::{
-    common::AppState,
-    history::load_ranked_history_items,
-};
+use crate::{common::AppState, history::load_ranked_history_items};
 use axum::{
     extract::State,
     http::{header, HeaderMap, StatusCode},
@@ -9,8 +6,11 @@ use axum::{
 };
 use std::sync::Arc;
 
-pub async fn robots_txt_handler(headers: HeaderMap) -> impl IntoResponse {
-    let base_url = derive_base_url(&headers);
+pub async fn robots_txt_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    let base_url = derive_base_url(&headers, &state.base_path);
     let body = format!(
         "User-agent: *\nAllow: /\nAllow: /proxydash\nAllow: /downloads\nAllow: /downloads/\nDisallow: /api/\nDisallow: /healthz\nSitemap: {base_url}/sitemap.xml\n"
     );
@@ -26,7 +26,7 @@ pub async fn sitemap_xml_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    let base_url = derive_base_url(&headers);
+    let base_url = derive_base_url(&headers, &state.base_path);
     let detail_entries = load_ranked_history_items(&state.db, None)
         .await
         .into_iter()
@@ -68,15 +68,43 @@ pub async fn sitemap_xml_handler(
     )
 }
 
-pub fn derive_base_url(headers: &HeaderMap) -> String {
+pub fn derive_base_url(headers: &HeaderMap, configured_base_path: &str) -> String {
     let forwarded_proto = header_value(headers, "x-forwarded-proto");
     let forwarded_host = header_value(headers, "x-forwarded-host");
     let host = header_value(headers, "host").unwrap_or_else(|| "localhost:8080".to_string());
 
     let proto = forwarded_proto.as_deref().unwrap_or("http");
     let host = forwarded_host.unwrap_or(host);
+    let base_path = derive_external_base_path(headers, configured_base_path);
 
-    format!("{proto}://{host}")
+    if base_path == "/" {
+        format!("{proto}://{host}")
+    } else {
+        format!("{proto}://{host}{base_path}")
+    }
+}
+
+pub fn derive_external_base_path(headers: &HeaderMap, configured_base_path: &str) -> String {
+    header_value(headers, "x-forwarded-prefix")
+        .and_then(|value| normalize_base_path(&value))
+        .unwrap_or_else(|| normalize_base_path(configured_base_path).unwrap_or_else(|| "/".to_string()))
+}
+
+pub fn prefix_path(base_path: &str, path: &str) -> String {
+    let normalized_base = normalize_base_path(base_path).unwrap_or_else(|| "/".to_string());
+    let normalized_path = if path.starts_with('/') {
+        path.to_string()
+    } else {
+        format!("/{path}")
+    };
+
+    if normalized_base == "/" {
+        normalized_path
+    } else if normalized_path == "/" {
+        normalized_base
+    } else {
+        format!("{normalized_base}{normalized_path}")
+    }
 }
 
 fn header_value(headers: &HeaderMap, name: &str) -> Option<String> {
@@ -88,6 +116,29 @@ fn header_value(headers: &HeaderMap, name: &str) -> Option<String> {
             .trim()
             .to_string()
     })
+}
+
+fn normalize_base_path(input: &str) -> Option<String> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Some("/".to_string());
+    }
+
+    let mut path = if trimmed.starts_with('/') {
+        trimmed.to_string()
+    } else {
+        format!("/{trimmed}")
+    };
+
+    while path.len() > 1 && path.ends_with('/') {
+        path.pop();
+    }
+
+    if path.contains('?') || path.contains('#') {
+        return None;
+    }
+
+    Some(path)
 }
 
 fn xml_escape(input: &str) -> String {

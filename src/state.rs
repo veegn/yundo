@@ -38,6 +38,8 @@ pub struct AppState {
     pub cache_dir: PathBuf,
     pub max_cache_size: u64,
     pub db: SqlitePool,
+    pub frontend_dist: PathBuf,
+    pub base_path: String,
 }
 
 pub async fn initialize_cache_dir(cache_dir: &Path) {
