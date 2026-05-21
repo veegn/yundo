@@ -17,6 +17,9 @@ pub struct Args {
     #[arg(short, long, default_value_t = 8080)]
     pub port: u16,
 
+    #[arg(long, default_value = "5GB", value_parser = parse_cache_size)]
+    pub filebox_size: u64,
+
     #[arg(long, default_value = "./frontend/dist")]
     pub frontend_dist: PathBuf,
 

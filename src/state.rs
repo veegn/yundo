@@ -37,6 +37,7 @@ pub struct AppState {
     pub client: Client,
     pub cache_dir: PathBuf,
     pub max_cache_size: u64,
+    pub filebox_size: u64,
     pub db: SqlitePool,
     pub frontend_dist: PathBuf,
     pub base_path: String,
@@ -46,6 +47,9 @@ pub async fn initialize_cache_dir(cache_dir: &Path) {
     fs::create_dir_all(cache_dir)
         .await
         .expect("failed to create cache directory");
+    fs::create_dir_all(cache_dir.join("filebox"))
+        .await
+        .expect("failed to create filebox directory");
 }
 
 pub async fn initialize_database(cache_dir: &Path) -> SqlitePool {
@@ -57,6 +61,19 @@ pub async fn initialize_database(cache_dir: &Path) -> SqlitePool {
         .connect(&db_url)
         .await
         .expect("failed to connect to SQLite");
+
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS filebox_files (
+            id TEXT PRIMARY KEY,
+            file_name TEXT NOT NULL,
+            file_size INTEGER NOT NULL,
+            uploaded_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            expires_at DATETIME NOT NULL
+        )",
+    )
+    .execute(&pool)
+    .await
+    .expect("failed to initialize filebox_files");
 
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS download_history (

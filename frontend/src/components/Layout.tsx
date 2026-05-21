@@ -42,6 +42,19 @@ export default function Layout() {
                   <span className="absolute bottom-0 left-0 w-full h-0.5 bg-primary rounded-full" />
                 )}
               </Link>
+              <Link
+                to="/filebox"
+                className={`transition-all relative py-1 ${
+                  location.pathname === '/filebox'
+                    ? 'text-on-surface'
+                    : 'text-on-surface-variant hover:text-primary'
+                }`}
+              >
+                临时文件箱
+                {location.pathname === '/filebox' && (
+                  <span className="absolute bottom-0 left-0 w-full h-0.5 bg-primary rounded-full" />
+                )}
+              </Link>
             </div>
           </div>
           <div className="flex items-center gap-4">

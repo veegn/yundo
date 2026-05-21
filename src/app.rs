@@ -24,6 +24,10 @@ pub fn build_router(state: Arc<AppState>, frontend_dist: PathBuf) -> Router {
         .route("/api/proxy", get(proxy_handler).head(proxy_head_handler))
         .route("/api/recent", get(history_handler))
         .route("/api/history", get(history_handler))
+        .route("/api/filebox/files", get(crate::filebox::list_filebox_handler))
+        .route("/api/filebox/upload", axum::routing::post(crate::filebox::upload_filebox_handler))
+        .route("/api/filebox/download/:id", get(crate::filebox::download_filebox_handler))
+        .route("/api/filebox/delete/:id", axum::routing::delete(crate::filebox::delete_filebox_handler))
         .route("/healthz", get(health_handler))
         .route("/robots.txt", get(robots_txt_handler))
         .route("/sitemap.xml", get(sitemap_xml_handler))
@@ -37,6 +41,7 @@ pub fn build_router(state: Arc<AppState>, frontend_dist: PathBuf) -> Router {
         inner_router = inner_router
             .route("/", get(spa_index_handler))
             .route("/proxydash", get(spa_index_handler))
+            .route("/filebox", get(spa_index_handler))
             .route("/index.html", get(spa_index_handler))
             .nest_service("/assets", ServeDir::new(frontend_dist.join("assets")))
             .fallback(get(base_aware_not_found_handler));

@@ -21,6 +21,7 @@ async fn main() {
     tracing::info!("max_cache_size = {}", max_cache_size);
     tracing::info!("base_path = {}", args.base_path);
 
+
     let client = Client::builder()
         .timeout(std::time::Duration::from_secs(300))
         .redirect(reqwest::redirect::Policy::limited(10))
@@ -31,12 +32,13 @@ async fn main() {
         client,
         cache_dir: args.cache_dir.clone(),
         max_cache_size,
+        filebox_size: args.filebox_size,
         db: db.clone(),
         frontend_dist: args.frontend_dist.clone(),
         base_path: args.base_path.clone(),
     });
-
     cache::spawn_cache_eviction_task(state.clone());
+    precision_proxy::filebox::spawn_filebox_cleanup_task(state.clone());
     spawn_history_cleanup_task(db);
 
     let app = app::build_router(state, args.frontend_dist.clone());

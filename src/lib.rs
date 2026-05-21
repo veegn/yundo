@@ -8,3 +8,5 @@ pub mod history;
 pub mod proxy;
 pub mod seo;
 pub mod state;
+pub mod filebox;
+

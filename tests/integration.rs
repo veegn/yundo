@@ -317,6 +317,7 @@ async fn spawn_proxy_server(cache_dir: PathBuf, upstream_addr: SocketAddr, base_
             .unwrap(),
         cache_dir,
         max_cache_size: 64 * 1024 * 1024,
+        filebox_size: 64 * 1024 * 1024,
         db,
         frontend_dist: PathBuf::from("./frontend/missing-dist"),
         base_path,
