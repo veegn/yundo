@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { formatBytes, getIconForFileName } from '../utils/formatters';
 import { useSeo } from '../utils/seo';
 import { withBasePath } from '../utils/basePath';
