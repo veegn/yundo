@@ -5,20 +5,24 @@ import ProxyDash from './pages/ProxyDash';
 import FileBox from './pages/FileBox';
 import NotFound from './pages/NotFound';
 import { getBasePath } from './utils/basePath';
+import { I18nProvider } from './context/I18nContext';
 
 export default function App() {
   const basePath = getBasePath();
 
   return (
-    <BrowserRouter basename={basePath === '/' ? undefined : basePath}>
-      <Routes>
-        <Route path="/" element={<Layout />}>
-          <Route index element={<Dashboard />} />
-          <Route path="proxydash" element={<ProxyDash />} />
-          <Route path="filebox" element={<FileBox />} />
-          <Route path="*" element={<NotFound />} />
-        </Route>
-      </Routes>
-    </BrowserRouter>
+    <I18nProvider>
+      <BrowserRouter basename={basePath === '/' ? undefined : basePath}>
+        <Routes>
+          <Route path="/" element={<Layout />}>
+            <Route index element={<Dashboard />} />
+            <Route path="proxydash" element={<ProxyDash />} />
+            <Route path="filebox" element={<FileBox />} />
+            <Route path="*" element={<NotFound />} />
+          </Route>
+        </Routes>
+      </BrowserRouter>
+    </I18nProvider>
   );
 }
+

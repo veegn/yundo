@@ -7,28 +7,45 @@ export function formatBytes(bytes: number, decimals = 2) {
   return `${parseFloat((bytes / Math.pow(k, i)).toFixed(dm))} ${sizes[i]}`;
 }
 
-export function timeAgo(dateString: string) {
+export function timeAgo(dateString: string, locale: 'zh' | 'en' = 'zh') {
   const date = new Date(dateString.endsWith('Z') ? dateString : dateString + 'Z');
   const now = new Date();
   const seconds = Math.floor((now.getTime() - date.getTime()) / 1000);
 
+  const isEn = locale === 'en';
   let interval = seconds / 31536000;
-  if (interval > 1) return Math.floor(interval) + ' 年前';
+  if (interval > 1) {
+    const val = Math.floor(interval);
+    return isEn ? `${val} year${val > 1 ? 's' : ''} ago` : `${val} 年前`;
+  }
   interval = seconds / 2592000;
-  if (interval > 1) return Math.floor(interval) + ' 个月前';
+  if (interval > 1) {
+    const val = Math.floor(interval);
+    return isEn ? `${val} month${val > 1 ? 's' : ''} ago` : `${val} 个月前`;
+  }
   interval = seconds / 86400;
-  if (interval > 1) return Math.floor(interval) + ' 天前';
+  if (interval > 1) {
+    const val = Math.floor(interval);
+    return isEn ? `${val} day${val > 1 ? 's' : ''} ago` : `${val} 天前`;
+  }
   interval = seconds / 3600;
-  if (interval > 1) return Math.floor(interval) + ' 小时前';
+  if (interval > 1) {
+    const val = Math.floor(interval);
+    return isEn ? `${val} hour${val > 1 ? 's' : ''} ago` : `${val} 小时前`;
+  }
   interval = seconds / 60;
-  if (interval > 1) return Math.floor(interval) + ' 分钟前';
-  return Math.floor(seconds) + ' 秒前';
+  if (interval > 1) {
+    const val = Math.floor(interval);
+    return isEn ? `${val} minute${val > 1 ? 's' : ''} ago` : `${val} 分钟前`;
+  }
+  const val = Math.floor(seconds);
+  return isEn ? `${val} second${val !== 1 ? 's' : ''} ago` : `${val} 秒前`;
 }
 
 
-export function formatDate(dateString: string) {
+export function formatDate(dateString: string, locale: 'zh' | 'en' = 'zh') {
   const date = new Date(dateString.endsWith('Z') ? dateString : dateString + 'Z');
-  return date.toLocaleString('zh-CN', {
+  return date.toLocaleString(locale === 'en' ? 'en-US' : 'zh-CN', {
     year: 'numeric',
     month: '2-digit',
     day: '2-digit',

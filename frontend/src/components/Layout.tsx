@@ -1,8 +1,25 @@
+import { useState, useRef, useEffect } from 'react';
 import { Outlet, Link, useLocation } from 'react-router-dom';
+import { useI18n } from '../context/I18nContext';
 
 export default function Layout() {
   const location = useLocation();
   const currentYear = new Date().getFullYear();
+  const { locale, changeLanguage, t } = useI18n();
+  const [dropdownOpen, setDropdownOpen] = useState(false);
+  const dropdownRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    function handleClickOutside(event: MouseEvent) {
+      if (dropdownRef.current && !dropdownRef.current.contains(event.target as Node)) {
+        setDropdownOpen(false);
+      }
+    }
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
+
+  const logoText = locale === 'zh' ? '云渡' : 'Yundo';
 
   return (
     <div className="bg-surface text-on-surface min-h-screen flex flex-col font-sans selection:bg-primary-container selection:text-on-primary-container">
@@ -13,7 +30,7 @@ export default function Layout() {
               <div className="w-8 h-8 bg-primary-gradient rounded-lg flex items-center justify-center text-on-primary shadow-sm group-hover:rotate-12 transition-transform">
                 <span className="material-symbols-outlined text-lg">sailing</span>
               </div>
-              <span className="text-xl font-bold tracking-tight text-on-surface">云渡</span>
+              <span className="text-xl font-bold tracking-tight text-on-surface">{logoText}</span>
             </Link>
             <div className="hidden md:flex items-center gap-8 font-medium text-sm">
               <Link
@@ -24,7 +41,7 @@ export default function Layout() {
                     : 'text-on-surface-variant hover:text-primary'
                 }`}
               >
-                首页
+                {t('nav.home')}
                 {location.pathname === '/' && (
                   <span className="absolute bottom-0 left-0 w-full h-0.5 bg-primary rounded-full" />
                 )}
@@ -37,7 +54,7 @@ export default function Layout() {
                     : 'text-on-surface-variant hover:text-primary'
                 }`}
               >
-                历史记录
+                {t('nav.history')}
                 {location.pathname === '/proxydash' && (
                   <span className="absolute bottom-0 left-0 w-full h-0.5 bg-primary rounded-full" />
                 )}
@@ -50,7 +67,7 @@ export default function Layout() {
                     : 'text-on-surface-variant hover:text-primary'
                 }`}
               >
-                临时文件箱
+                {t('nav.filebox')}
                 {location.pathname === '/filebox' && (
                   <span className="absolute bottom-0 left-0 w-full h-0.5 bg-primary rounded-full" />
                 )}
@@ -58,6 +75,50 @@ export default function Layout() {
             </div>
           </div>
           <div className="flex items-center gap-4">
+            {/* Language Selector Dropdown */}
+            <div className="relative" ref={dropdownRef}>
+              <button
+                onClick={() => setDropdownOpen(!dropdownOpen)}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-outline-variant/30 hover:border-secondary hover:bg-surface-container-high transition-all text-xs font-semibold text-on-surface-variant cursor-pointer"
+              >
+                <span className="material-symbols-outlined text-[16px]">language</span>
+                <span>{locale === 'zh' ? '简体中文' : 'English'}</span>
+                <span className={`material-symbols-outlined text-[12px] transition-transform duration-200 ${dropdownOpen ? 'rotate-180' : ''}`}>
+                  keyboard_arrow_down
+                </span>
+              </button>
+              {dropdownOpen && (
+                <div className="absolute right-0 mt-2 w-32 rounded-xl bg-surface-container border border-outline-variant/20 shadow-xl backdrop-blur-md overflow-hidden z-50 animate-in fade-in slide-in-from-top-2 duration-200">
+                  <button
+                    onClick={() => {
+                      changeLanguage('zh');
+                      setDropdownOpen(false);
+                    }}
+                    className={`w-full text-left px-4 py-2.5 text-xs font-medium transition-colors cursor-pointer ${
+                      locale === 'zh'
+                        ? 'bg-secondary/10 text-secondary'
+                        : 'text-on-surface hover:bg-surface-container-high'
+                    }`}
+                  >
+                    简体中文
+                  </button>
+                  <button
+                    onClick={() => {
+                      changeLanguage('en');
+                      setDropdownOpen(false);
+                    }}
+                    className={`w-full text-left px-4 py-2.5 text-xs font-medium transition-colors cursor-pointer ${
+                      locale === 'en'
+                        ? 'bg-secondary/10 text-secondary'
+                        : 'text-on-surface hover:bg-surface-container-high'
+                    }`}
+                  >
+                    English
+                  </button>
+                </div>
+              )}
+            </div>
+
             <a
               href="https://github.com/veegn/yundo"
               target="_blank"
@@ -82,20 +143,20 @@ export default function Layout() {
               <div className="w-6 h-6 bg-primary-gradient rounded flex items-center justify-center text-on-primary transform rotate-6">
                 <span className="material-symbols-outlined text-[14px]">sailing</span>
               </div>
-              <span className="text-lg font-bold text-on-surface">云渡</span>
+              <span className="text-lg font-bold text-on-surface">{logoText}</span>
             </div>
             <p className="text-sm text-on-surface-variant max-w-xs text-center md:text-left">
-              高效、稳定的文件代理下载服务，让资源获取更简单。
+              {t('footer.desc')}
             </p>
           </div>
           <div className="flex flex-col items-center md:items-end gap-4">
             <div className="flex items-center gap-6">
-              <a href="https://github.com/veegn/yundo" className="text-sm font-medium text-on-surface-variant hover:text-primary transition-colors">GitHub</a>
-              <a href="#" className="text-sm font-medium text-on-surface-variant hover:text-primary transition-colors">隐私政策</a>
-              <a href="#" className="text-sm font-medium text-on-surface-variant hover:text-primary transition-colors">使用条款</a>
+              <a href="https://github.com/veegn/yundo" className="text-sm font-medium text-on-surface-variant hover:text-primary transition-colors">{t('footer.github')}</a>
+              <a href="#" className="text-sm font-medium text-on-surface-variant hover:text-primary transition-colors">{t('footer.privacy')}</a>
+              <a href="#" className="text-sm font-medium text-on-surface-variant hover:text-primary transition-colors">{t('footer.terms')}</a>
             </div>
             <span className="text-xs text-on-surface-variant/60 tracking-wider font-mono">
-              © {currentYear} VEEGN • MADE WITH ❤️ FOR RUST
+              {t('footer.copyright', { year: currentYear })}
             </span>
           </div>
         </div>
@@ -103,4 +164,5 @@ export default function Layout() {
     </div>
   );
 }
+
 

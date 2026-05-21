@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom';
 import { formatBytes, timeAgo, getIconForFileName } from '../utils/formatters';
 import { useSeo } from '../utils/seo';
 import { withBasePath } from '../utils/basePath';
+import { useI18n } from '../context/I18nContext';
 
 interface HistoryItem {
   slug: string;
@@ -18,13 +19,13 @@ export default function Dashboard() {
   const [url, setUrl] = useState('');
   const [history, setHistory] = useState<HistoryItem[]>([]);
   const [loading, setLoading] = useState(true);
+  const { locale, t } = useI18n();
 
   useSeo({
-    title: '云渡 - HTTP/HTTPS 下载代理与文件加速',
-    description:
-      '云渡提供稳定的 HTTP/HTTPS 文件下载代理、断点续传支持和热门下载记录展示，帮助用户更高效地获取公开下载资源。',
+    title: t('seo.dashboard.title'),
+    description: t('seo.dashboard.description'),
     canonicalPath: '/',
-    keywords: '下载代理,HTTP下载,HTTPS下载,文件加速,断点续传,下载历史',
+    keywords: t('seo.dashboard.keywords'),
   });
 
   useEffect(() => {
@@ -56,17 +57,17 @@ export default function Dashboard() {
     <main className="flex-grow flex flex-col items-center px-6 pt-24 pb-16 max-w-7xl mx-auto w-full">
       <section className="w-full max-w-2xl text-center mb-24">
         <h1 className="text-4xl font-extrabold tracking-tight text-on-surface mb-4">
-          极简代理 极速下载
+          {t('dashboard.title')}
         </h1>
         <p className="text-on-surface-variant mb-12">
-          输入任意 HTTP/HTTPS 下载链接，即刻体验无阻断、全速的文件获取。
+          {t('dashboard.subtitle')}
         </p>
         <div className="flex flex-col md:flex-row gap-3 p-2 bg-surface-container-lowest rounded-xl ghost-border ghost-shadow">
           <div className="flex-grow flex items-center px-4 bg-surface-container-lowest">
             <span className="material-symbols-outlined text-outline mr-3">link</span>
             <input
               className="w-full bg-transparent border-none focus:ring-0 text-on-surface placeholder:text-outline/60 py-3 font-medium outline-none"
-              placeholder="https://example.com/large-file.zip"
+              placeholder={t('dashboard.placeholder')}
               type="text"
               value={url}
               onChange={(e) => setUrl(e.target.value)}
@@ -75,9 +76,9 @@ export default function Dashboard() {
           </div>
           <button
             onClick={handleDownload}
-            className="bg-primary-gradient text-on-primary px-8 py-3 rounded-lg font-semibold flex items-center justify-center gap-2 hover:opacity-90 active:scale-[0.98] transition-all"
+            className="bg-primary-gradient text-on-primary px-8 py-3 rounded-lg font-semibold flex items-center justify-center gap-2 hover:opacity-90 active:scale-[0.98] transition-all cursor-pointer"
           >
-            <span>开始下载</span>
+            <span>{t('dashboard.btn_download')}</span>
             <span className="material-symbols-outlined text-sm">rocket_launch</span>
           </button>
         </div>
@@ -85,19 +86,19 @@ export default function Dashboard() {
 
       <section className="w-full max-w-4xl">
         <div className="flex justify-between items-end mb-6">
-          <h2 className="text-xl font-bold text-on-surface">热门下载</h2>
+          <h2 className="text-xl font-bold text-on-surface">{t('dashboard.hot_downloads')}</h2>
           <div className="flex items-center gap-4">
             <a
               href={withBasePath('/downloads')}
               className="text-sm font-medium text-secondary flex items-center gap-1 hover:underline underline-offset-4 transition-all"
             >
-              浏览资源列表
+              {t('dashboard.browse_resources')}
             </a>
             <Link
               to="/proxydash"
               className="text-sm font-medium text-secondary flex items-center gap-1 hover:underline underline-offset-4 transition-all"
             >
-              查看全部历史
+              {t('dashboard.view_all_history')}
               <span className="material-symbols-outlined text-xs">arrow_forward</span>
             </Link>
           </div>
@@ -106,9 +107,9 @@ export default function Dashboard() {
         <div className="bg-surface-container-low rounded-xl overflow-hidden">
           <div className="divide-y divide-outline-variant/10">
             {loading ? (
-              <div className="p-8 text-center text-on-surface-variant">加载中...</div>
+              <div className="p-8 text-center text-on-surface-variant">{t('dashboard.loading')}</div>
             ) : history.length === 0 ? (
-              <div className="p-8 text-center text-on-surface-variant">暂无下载记录</div>
+              <div className="p-8 text-center text-on-surface-variant">{t('dashboard.no_history')}</div>
             ) : (
               history.map((item, index) => (
                 <div
@@ -122,7 +123,7 @@ export default function Dashboard() {
                         {getIconForFileName(item.file_name)}
                       </span>
                       {index === 0 && (
-                        <span className="absolute -top-2 -right-2 text-lg" title="最热门下载">
+                        <span className="absolute -top-2 -right-2 text-lg" title={locale === 'zh' ? '最热门下载' : 'Most Popular'}>
                           🔥
                         </span>
                       )}
@@ -150,15 +151,15 @@ export default function Dashboard() {
                         {formatBytes(item.file_size)}
                       </span>
                       <span className="text-[10px] text-on-surface-variant/70">
-                        7 天内下载 {item.count_7d} 次
+                        {t('dashboard.count_7d', { count: item.count_7d })}
                       </span>
                     </div>
                     <span className="text-xs text-on-surface-variant font-mono tabular-nums w-20 text-right">
-                      {timeAgo(item.last_download_at)}
+                      {timeAgo(item.last_download_at, locale)}
                     </span>
                     <button
-                      className="w-8 h-8 rounded-full bg-primary-container text-on-primary-container flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
-                      title="重新下载"
+                      className="w-8 h-8 rounded-full bg-primary-container text-on-primary-container flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity cursor-pointer"
+                      title={t('dashboard.re_download')}
                       onClick={(e) => {
                         e.stopPropagation();
                         handleDownloadHistory(item.url);
@@ -171,7 +172,7 @@ export default function Dashboard() {
                       className="text-xs text-secondary font-medium hover:underline"
                       onClick={(e) => e.stopPropagation()}
                     >
-                      详情
+                      {t('dashboard.detail')}
                     </a>
                   </div>
                 </div>
@@ -183,3 +184,4 @@ export default function Dashboard() {
     </main>
   );
 }
+

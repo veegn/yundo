@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { formatBytes, getIconForFileName } from '../utils/formatters';
 import { useSeo } from '../utils/seo';
 import { withBasePath } from '../utils/basePath';
+import { useI18n } from '../context/I18nContext';
 
 interface FileBoxItem {
   id: string;
@@ -18,6 +19,7 @@ interface Stats {
 }
 
 export default function FileBox() {
+  const { locale, t } = useI18n();
   const [stats, setStats] = useState<Stats>({
     total_space: 5 * 1024 * 1024 * 1024,
     used_space: 0,
@@ -32,18 +34,17 @@ export default function FileBox() {
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   useSeo({
-    title: '临时文件箱 - 云渡',
-    description:
-      '云渡临时文件箱提供安全、快捷的文件中转服务。自助上传，保留最长一周，随时随地极速下载。',
+    title: t('seo.filebox.title'),
+    description: t('seo.filebox.description'),
     canonicalPath: '/filebox',
-    keywords: '临时文件箱,文件分享,临时上传,文件有效期,云储存',
+    keywords: t('seo.filebox.keywords'),
   });
 
   const fetchFiles = () => {
     setLoading(true);
     fetch(withBasePath('/api/filebox/files'))
       .then((res) => {
-        if (!res.ok) throw new Error(`获取文件列表失败: ${res.status}`);
+        if (!res.ok) throw new Error(`${t('filebox.err.fetch')}: ${res.status}`);
         return res.json();
       })
       .then((data) => {
@@ -52,7 +53,7 @@ export default function FileBox() {
       })
       .catch((err) => {
         console.error(err);
-        setErrorMessage('无法加载文件列表，请稍后重试。');
+        setErrorMessage(t('filebox.err.load'));
         setLoading(false);
       });
   };
@@ -113,32 +114,32 @@ export default function FileBox() {
       } else {
         try {
           const res = JSON.parse(xhr.responseText);
-          setErrorMessage(res.message || '文件上传失败，空间已满或文件超出限制。');
+          setErrorMessage(res.message || t('filebox.err.upload_failed'));
         } catch {
-          setErrorMessage('文件上传失败，空间已满或文件超出限制。');
+          setErrorMessage(t('filebox.err.upload_failed'));
         }
       }
     };
 
     xhr.onerror = () => {
       setUploading(false);
-      setErrorMessage('网络错误，上传失败。');
+      setErrorMessage(t('filebox.err.network'));
     };
 
     xhr.send(formData);
   };
 
   const handleDelete = (id: string) => {
-    if (!confirm('确定要彻底删除该文件吗？')) return;
+    if (!confirm(t('filebox.delete.confirm'))) return;
 
     fetch(withBasePath(`/api/filebox/delete/${id}`), { method: 'DELETE' })
       .then((res) => {
-        if (!res.ok) throw new Error('删除失败');
+        if (!res.ok) throw new Error('Delete failed');
         fetchFiles();
       })
       .catch((err) => {
         console.error(err);
-        setErrorMessage('删除文件失败，请重试。');
+        setErrorMessage(t('filebox.err.delete_failed'));
       });
   };
 
@@ -150,27 +151,28 @@ export default function FileBox() {
         setCopiedId(id);
         setTimeout(() => setCopiedId(null), 2000);
       })
-      .catch((err) => console.error('复制链接失败: ', err));
+      .catch((err) => console.error('Failed to copy link: ', err));
   };
 
   const formatExpiration = (expiresAtString: string) => {
     const expires = new Date(expiresAtString.replace(' ', 'T') + 'Z');
     const now = new Date();
     const diffMs = expires.getTime() - now.getTime();
-    if (diffMs <= 0) return '已过期';
+    if (diffMs <= 0) return t('filebox.expires.expired');
 
     const diffSecs = Math.floor(diffMs / 1000);
     const days = Math.floor(diffSecs / 86400);
     const hours = Math.floor((diffSecs % 86400) / 3600);
     const mins = Math.floor((diffSecs % 3600) / 60);
 
+    const isEn = locale === 'en';
     if (days > 0) {
-      return `剩 ${days} 天 ${hours} 小时`;
+      return isEn ? `${days}d ${hours}h left` : `剩 ${days} 天 ${hours} 小时`;
     }
     if (hours > 0) {
-      return `剩 ${hours} 小时 ${mins} 分钟`;
+      return isEn ? `${hours}h ${mins}m left` : `剩 ${hours} 小时 ${mins} 分钟`;
     }
-    return `剩 ${mins} 分钟`;
+    return isEn ? `${mins}m left` : `剩 ${mins} 分钟`;
   };
 
   const getExpirationBadgeClass = (expiresAtString: string) => {
@@ -193,10 +195,10 @@ export default function FileBox() {
     <main className="flex-grow flex flex-col items-center px-6 pt-24 pb-16 max-w-7xl mx-auto w-full">
       <section className="w-full max-w-4xl text-center mb-12">
         <h1 className="text-4xl font-extrabold tracking-tight text-on-surface mb-4">
-          临时文件箱
+          {t('filebox.title')}
         </h1>
         <p className="text-on-surface-variant max-w-xl mx-auto mb-8">
-          自主上传临时文件，生成高带宽极速直链。文件最长保存 <span className="font-bold text-secondary">7 天</span>，到期自动粉碎销毁。
+          {t('filebox.subtitle')}
         </p>
 
         {/* Storage usage bar */}
@@ -204,10 +206,14 @@ export default function FileBox() {
           <div className="flex justify-between items-center mb-3">
             <span className="text-sm font-semibold text-on-surface flex items-center gap-1.5">
               <span className="material-symbols-outlined text-secondary text-lg">cloud_queue</span>
-              临时存储空间配额
+              {t('filebox.quota.title')}
             </span>
             <span className="text-sm font-mono text-on-surface-variant">
-              {formatBytes(stats.used_space)} / {formatBytes(stats.total_space)} ({usedPercentage.toFixed(1)}%)
+              {t('filebox.quota.used', {
+                used: formatBytes(stats.used_space),
+                total: formatBytes(stats.total_space),
+                percent: usedPercentage.toFixed(1),
+              })}
             </span>
           </div>
           <div className="w-full bg-surface-container-high h-3.5 rounded-full overflow-hidden">
@@ -262,16 +268,16 @@ export default function FileBox() {
                 ></div>
                 <span className="text-sm font-bold text-secondary font-mono">{uploadProgress}%</span>
               </div>
-              <p className="text-on-surface font-semibold mb-1">正在上传文件...</p>
-              <p className="text-xs text-on-surface-variant">请勿关闭当前页面，正在安全流式传输文件</p>
+              <p className="text-on-surface font-semibold mb-1">{t('filebox.upload.uploading')}</p>
+              <p className="text-xs text-on-surface-variant">{t('filebox.upload.uploading_sub')}</p>
             </div>
           ) : (
             <div className="flex flex-col items-center">
               <div className={`w-16 h-16 rounded-2xl bg-secondary-fixed flex items-center justify-center text-on-secondary-fixed mb-4 transition-transform duration-300 ${dragActive ? 'scale-110 rotate-3' : ''}`}>
                 <span className="material-symbols-outlined text-3xl">upload_file</span>
               </div>
-              <h3 className="text-lg font-bold text-on-surface mb-1">拖拽文件到这里，或点击选择</h3>
-              <p className="text-sm text-on-surface-variant">支持上传任意文件格式，文件最大保存 7 天</p>
+              <h3 className="text-lg font-bold text-on-surface mb-1">{t('filebox.upload.dragging')}</h3>
+              <p className="text-sm text-on-surface-variant">{t('filebox.upload.dragging_sub')}</p>
             </div>
           )}
         </div>
@@ -280,7 +286,7 @@ export default function FileBox() {
       {/* Files List */}
       <section className="w-full max-w-4xl">
         <h2 className="text-xl font-bold text-on-surface mb-6 flex items-center gap-2">
-          <span>当前文件箱</span>
+          <span>{t('filebox.list.title')}</span>
           <span className="bg-secondary-fixed text-on-secondary-fixed text-xs px-2.5 py-1 rounded-full font-mono font-bold">
             {stats.files.length}
           </span>
@@ -290,23 +296,23 @@ export default function FileBox() {
           {loading ? (
             <div className="p-12 text-center text-on-surface-variant flex flex-col items-center gap-2">
               <div className="w-8 h-8 border-4 border-outline-variant border-t-secondary rounded-full animate-spin"></div>
-              <span className="text-sm mt-2">加载列表中...</span>
+              <span className="text-sm mt-2">{t('filebox.list.loading')}</span>
             </div>
           ) : stats.files.length === 0 ? (
             <div className="p-16 text-center text-on-surface-variant">
               <span className="material-symbols-outlined text-5xl opacity-40 mb-3 block">folder_open</span>
-              <p className="text-base font-medium">临时文件箱为空</p>
-              <p className="text-xs mt-1 text-on-surface-variant/70">上传一些文件，生成的极速链接会在此展示</p>
+              <p className="text-base font-medium">{t('filebox.list.empty')}</p>
+              <p className="text-xs mt-1 text-on-surface-variant/70">{t('filebox.list.empty_sub')}</p>
             </div>
           ) : (
             <div className="overflow-x-auto">
               <table className="w-full text-left border-collapse">
                 <thead>
                   <tr className="bg-surface-container border-b border-outline-variant/10 text-on-surface-variant/80 text-xs font-semibold uppercase tracking-wider">
-                    <th className="px-6 py-4">文件名</th>
-                    <th className="px-6 py-4">大小</th>
-                    <th className="px-6 py-4">有效期</th>
-                    <th className="px-6 py-4 text-right">操作</th>
+                    <th className="px-6 py-4">{t('filebox.table.filename')}</th>
+                    <th className="px-6 py-4">{t('filebox.table.size')}</th>
+                    <th className="px-6 py-4">{t('filebox.table.expires')}</th>
+                    <th className="px-6 py-4 text-right">{t('filebox.table.action')}</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-outline-variant/10">
@@ -341,18 +347,20 @@ export default function FileBox() {
                         </span>
                       </td>
                       <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
-                        <div className="flex justify-end gap-1.5">
+                        <div className="flex justify-end gap-1.5 animate-in fade-in duration-200">
                           {/* Copy link button */}
                           <div className="relative">
                             <button
                               onClick={() => copyToClipboard(file.id)}
-                              className="p-1.5 hover:bg-surface-container-high text-on-surface-variant hover:text-secondary rounded-lg transition-colors flex items-center gap-1"
-                              title="复制下载直链"
+                              className="p-1.5 hover:bg-surface-container-high text-on-surface-variant hover:text-secondary rounded-lg transition-colors flex items-center gap-1 cursor-pointer"
+                              title={t('filebox.action.copy')}
                             >
                               <span className="material-symbols-outlined text-[19px]">
                                 {copiedId === file.id ? 'check_circle' : 'link'}
                               </span>
-                              <span className="text-xs">{copiedId === file.id ? '已复制' : '复制直链'}</span>
+                              <span className="text-xs">
+                                {copiedId === file.id ? t('filebox.action.copied') : t('filebox.action.copy')}
+                              </span>
                             </button>
                           </div>
                           
@@ -361,21 +369,21 @@ export default function FileBox() {
                             href={withBasePath(`/api/filebox/download/${file.id}`)}
                             target="_blank"
                             rel="noreferrer"
-                            className="p-1.5 hover:bg-surface-container-high text-on-surface-variant hover:text-primary rounded-lg transition-colors flex items-center gap-1"
-                            title="下载"
+                            className="p-1.5 hover:bg-surface-container-high text-on-surface-variant hover:text-primary rounded-lg transition-colors flex items-center gap-1 cursor-pointer"
+                            title={t('filebox.action.download')}
                           >
                             <span className="material-symbols-outlined text-[19px]">download</span>
-                            <span className="text-xs">下载</span>
+                            <span className="text-xs">{t('filebox.action.download')}</span>
                           </a>
 
                           {/* Delete button */}
                           <button
                             onClick={() => handleDelete(file.id)}
-                            className="p-1.5 hover:bg-surface-container-high text-on-surface-variant hover:text-error rounded-lg transition-colors flex items-center gap-1"
-                            title="删除"
+                            className="p-1.5 hover:bg-surface-container-high text-on-surface-variant hover:text-error rounded-lg transition-colors flex items-center gap-1 cursor-pointer"
+                            title={t('filebox.action.delete')}
                           >
                             <span className="material-symbols-outlined text-[19px]">delete</span>
-                            <span className="text-xs">删除</span>
+                            <span className="text-xs">{t('filebox.action.delete')}</span>
                           </button>
                         </div>
                       </td>
@@ -390,3 +398,4 @@ export default function FileBox() {
     </main>
   );
 }
+
