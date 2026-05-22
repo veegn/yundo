@@ -16,44 +16,53 @@ use tokio_util::io::ReaderStream;
 use sqlx::Row;
 
 pub async fn get_combined_used_size(cache_dir: &Path, db: &sqlx::SqlitePool) -> u64 {
-    let mut proxy_cache_size = 0_u64;
-    // 1. Calculate proxy cache data files size
-    if let Ok(mut entries) = fs::read_dir(cache_dir).await {
-        while let Ok(Some(entry)) = entries.next_entry().await {
-            if let Ok(metadata) = entry.metadata().await {
-                if metadata.is_file() && entry.path().extension().map_or(false, |ext| ext == "data") {
-                    proxy_cache_size += metadata.len();
-                }
-            }
-        }
-    }
-
-    // 2. Get active filebox files size from DB
+    // 1. Get active filebox files size from DB
     let filebox_size = sqlx::query("SELECT COALESCE(SUM(file_size), 0) AS total_size FROM filebox_files WHERE expires_at >= datetime('now')")
         .fetch_one(db)
         .await
         .map(|row| row.get::<i64, _>("total_size") as u64)
         .unwrap_or(0);
 
-    // 3. Calculate filebox_tmp size (in-progress chunked uploads)
-    let filebox_tmp_dir = cache_dir.join("filebox_tmp");
-    let mut tmp_size = 0_u64;
-    let mut dirs_to_visit = vec![filebox_tmp_dir];
-    while let Some(dir) = dirs_to_visit.pop() {
-        if let Ok(mut entries) = fs::read_dir(&dir).await {
-            while let Ok(Some(entry)) = entries.next_entry().await {
-                if let Ok(metadata) = entry.metadata().await {
-                    if metadata.is_dir() {
-                        dirs_to_visit.push(entry.path());
-                    } else if metadata.is_file() {
-                        tmp_size += metadata.len();
+    // 2. Calculate directory sizes synchronously in a blocking thread to avoid async task-spawning latency
+    let cache_dir_buf = cache_dir.to_path_buf();
+    let disk_size = tokio::task::spawn_blocking(move || {
+        let mut proxy_cache_size = 0_u64;
+        
+        // Calculate proxy cache data files size
+        if let Ok(entries) = std::fs::read_dir(&cache_dir_buf) {
+            for entry in entries.flatten() {
+                if let Ok(metadata) = entry.metadata() {
+                    if metadata.is_file() && entry.path().extension().map_or(false, |ext| ext == "data") {
+                        proxy_cache_size += metadata.len();
                     }
                 }
             }
         }
-    }
 
-    proxy_cache_size + filebox_size + tmp_size
+        // Calculate filebox_tmp size (in-progress chunked uploads)
+        let filebox_tmp_dir = cache_dir_buf.join("filebox_tmp");
+        let mut tmp_size = 0_u64;
+        let mut dirs_to_visit = vec![filebox_tmp_dir];
+        while let Some(dir) = dirs_to_visit.pop() {
+            if let Ok(entries) = std::fs::read_dir(&dir) {
+                for entry in entries.flatten() {
+                    if let Ok(metadata) = entry.metadata() {
+                        if metadata.is_dir() {
+                            dirs_to_visit.push(entry.path());
+                        } else if metadata.is_file() {
+                            tmp_size += metadata.len();
+                        }
+                    }
+                }
+            }
+        }
+
+        proxy_cache_size + tmp_size
+    })
+    .await
+    .unwrap_or(0);
+
+    filebox_size + disk_size
 }
 
 pub fn spawn_cache_eviction_task(state: Arc<AppState>) {
@@ -68,22 +77,28 @@ pub fn spawn_cache_eviction_task(state: Arc<AppState>) {
 }
 
 pub(crate) async fn enforce_cache_size(state: &AppState) -> std::io::Result<()> {
-    let mut files = Vec::new();
-    let mut proxy_cache_size = 0_u64;
-
-    // 1. Calculate proxy cache files size and gather their modified dates
-    let mut entries = fs::read_dir(&state.cache_dir).await?;
-    while let Some(entry) = entries.next_entry().await? {
-        let metadata = entry.metadata().await?;
-        if metadata.is_file() {
-            if entry.path().extension().map_or(false, |ext| ext == "data") {
-                let size = metadata.len();
-                proxy_cache_size += size;
-                let modified = metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
-                files.push((entry.path(), size, modified));
+    let cache_dir_buf = state.cache_dir.to_path_buf();
+    
+    // 1. Calculate proxy cache files size and gather their modified dates synchronously inside spawn_blocking
+    let (mut files, proxy_cache_size) = tokio::task::spawn_blocking(move || {
+        let mut files = Vec::new();
+        let mut proxy_cache_size = 0_u64;
+        if let Ok(entries) = std::fs::read_dir(&cache_dir_buf) {
+            for entry in entries.flatten() {
+                if let Ok(metadata) = entry.metadata() {
+                    if metadata.is_file() && entry.path().extension().map_or(false, |ext| ext == "data") {
+                        let size = metadata.len();
+                        proxy_cache_size += size;
+                        let modified = metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+                        files.push((entry.path(), size, modified));
+                    }
+                }
             }
         }
-    }
+        (files, proxy_cache_size)
+    })
+    .await
+    .unwrap_or((Vec::new(), 0));
 
     // 2. Get active filebox files size from DB
     let filebox_size = sqlx::query("SELECT COALESCE(SUM(file_size), 0) AS total_size FROM filebox_files WHERE expires_at >= datetime('now')")

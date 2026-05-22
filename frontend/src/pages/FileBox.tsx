@@ -113,47 +113,68 @@ export default function FileBox() {
       const totalChunks = Math.ceil(file.size / CHUNK_SIZE) || 1;
       const uploadId = Math.random().toString(36).substring(2, 15) + Date.now().toString(36);
 
-      // Upload each chunk sequentially
-      for (let chunkIndex = 0; chunkIndex < totalChunks; chunkIndex++) {
-        const start = chunkIndex * CHUNK_SIZE;
-        const end = Math.min(start + CHUNK_SIZE, file.size);
-        const chunk = file.slice(start, end);
+      // Upload chunks concurrently (concurrency limit = 3) to optimize speed and bypass network delay
+      const MAX_CONCURRENT = 3;
+      const chunkIndices = Array.from({ length: totalChunks }, (_, idx) => idx);
+      let uploadError: Error | null = null;
 
-        const formData = new FormData();
-        formData.append('upload_id', uploadId);
-        formData.append('chunk_index', chunkIndex.toString());
-        formData.append('file', chunk);
+      const uploadWorker = async () => {
+        while (chunkIndices.length > 0 && !uploadError) {
+          const chunkIndex = chunkIndices.shift();
+          if (chunkIndex === undefined) break;
 
-        try {
-          const res = await fetch(withBasePath('/api/filebox/upload-chunk'), {
-            method: 'POST',
-            body: formData,
-          });
+          const start = chunkIndex * CHUNK_SIZE;
+          const end = Math.min(start + CHUNK_SIZE, file.size);
+          const chunk = file.slice(start, end);
 
-          if (!res.ok) {
-            let errText = await res.text();
-            try {
-              const errObj = JSON.parse(errText);
-              errText = errObj.message || errText;
-            } catch (e) {}
-            throw new Error(errText || t('filebox.err.upload_failed'));
+          const formData = new FormData();
+          formData.append('upload_id', uploadId);
+          formData.append('chunk_index', chunkIndex.toString());
+          formData.append('file', chunk);
+
+          try {
+            const res = await fetch(withBasePath('/api/filebox/upload-chunk'), {
+              method: 'POST',
+              body: formData,
+            });
+
+            if (!res.ok) {
+              let errText = await res.text();
+              try {
+                const errObj = JSON.parse(errText);
+                errText = errObj.message || errText;
+              } catch (e) {}
+              throw new Error(errText || t('filebox.err.upload_failed'));
+            }
+
+            // Update progress
+            totalUploadedBytesAllFiles += chunk.size;
+            const percent = Math.round((totalUploadedBytesAllFiles / totalBytesAllFiles) * 100);
+            setUploadProgress(Math.min(percent, 99)); // Keep at 99% until fully merged
+
+            const duration = (Date.now() - startTime) / 1000;
+            if (duration > 0.5) {
+              const speedBytesPerSec = totalUploadedBytesAllFiles / duration;
+              setUploadSpeed(`${formatBytes(speedBytesPerSec)}/s`);
+            }
+          } catch (err: any) {
+            uploadError = err;
+            throw err;
           }
-
-          // Update progress
-          totalUploadedBytesAllFiles += chunk.size;
-          const percent = Math.round((totalUploadedBytesAllFiles / totalBytesAllFiles) * 100);
-          setUploadProgress(Math.min(percent, 99)); // Keep at 99% until fully merged
-
-          const duration = (Date.now() - startTime) / 1000;
-          if (duration > 0.5) {
-            const speedBytesPerSec = totalUploadedBytesAllFiles / duration;
-            setUploadSpeed(`${formatBytes(speedBytesPerSec)}/s`);
-          }
-        } catch (err: any) {
-          setUploading(false);
-          setErrorMessage(err.message || t('filebox.err.network'));
-          return; // Stop processing further chunks and files
         }
+      };
+
+      try {
+        const workers = [];
+        const numWorkers = Math.min(MAX_CONCURRENT, totalChunks);
+        for (let w = 0; w < numWorkers; w++) {
+          workers.push(uploadWorker());
+        }
+        await Promise.all(workers);
+      } catch (err: any) {
+        setUploading(false);
+        setErrorMessage(err.message || t('filebox.err.network'));
+        return; // Stop processing further files
       }
 
       // Signal upload completion for this file to merge chunks
