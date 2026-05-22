@@ -28,6 +28,7 @@ export default function FileBox() {
   const [loading, setLoading] = useState(true);
   const [uploading, setUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
+  const [uploadSpeed, setUploadSpeed] = useState<string | null>(null);
   const [dragActive, setDragActive] = useState(false);
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -91,6 +92,9 @@ export default function FileBox() {
     setUploading(true);
     setErrorMessage(null);
     setUploadProgress(0);
+    setUploadSpeed(null);
+
+    const startTime = Date.now();
 
     const formData = new FormData();
     for (let i = 0; i < files.length; i++) {
@@ -104,6 +108,12 @@ export default function FileBox() {
       if (e.lengthComputable) {
         const percent = Math.round((e.loaded / e.total) * 100);
         setUploadProgress(percent);
+
+        const duration = (Date.now() - startTime) / 1000;
+        if (duration > 0.1) {
+          const speedBytesPerSec = e.loaded / duration;
+          setUploadSpeed(`${formatBytes(speedBytesPerSec)}/s`);
+        }
       }
     };
 
@@ -270,6 +280,12 @@ export default function FileBox() {
               </div>
               <p className="text-on-surface font-semibold mb-1">{t('filebox.upload.uploading')}</p>
               <p className="text-xs text-on-surface-variant">{t('filebox.upload.uploading_sub')}</p>
+              {uploadSpeed && (
+                <div className="inline-flex items-center gap-1.5 mt-3 px-3 py-1 bg-secondary/10 text-secondary text-xs font-mono font-bold rounded-full animate-in fade-in duration-300">
+                  <span className="material-symbols-outlined text-[14px]">speed</span>
+                  <span>{uploadSpeed}</span>
+                </div>
+              )}
             </div>
           ) : (
             <div className="flex flex-col items-center">
