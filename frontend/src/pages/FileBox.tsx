@@ -248,6 +248,15 @@ export default function FileBox() {
         }
         await Promise.all(workers);
       } catch (err: any) {
+        // Proactively signal backend to delete partial chunks
+        fetch(withBasePath('/api/filebox/upload-abort'), {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({ upload_id: uploadId })
+        }).catch((e) => console.error('Failed to send upload-abort signal:', e));
+
         setUploading(false);
         setErrorMessage(err.message || t('filebox.err.network'));
         return; // Stop processing further files

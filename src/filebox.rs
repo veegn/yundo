@@ -483,11 +483,42 @@ pub async fn upload_complete_handler(
     .into_response()
 }
 
+#[derive(serde::Deserialize)]
+pub struct UploadAbortPayload {
+    pub upload_id: String,
+}
+
+pub async fn upload_abort_handler(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<UploadAbortPayload>,
+) -> impl IntoResponse {
+    if payload.upload_id.is_empty() {
+        return (StatusCode::BAD_REQUEST, "Missing upload_id").into_response();
+    }
+
+    // Strict validation to prevent directory traversal
+    if payload.upload_id.contains('/') || payload.upload_id.contains('\\') || payload.upload_id.contains("..") {
+        return (StatusCode::BAD_REQUEST, "Invalid upload_id").into_response();
+    }
+
+    let chunk_dir = state.cache_dir.join("filebox_tmp").join(&payload.upload_id);
+    if chunk_dir.exists() {
+        if let Err(err) = fs::remove_dir_all(&chunk_dir).await {
+            tracing::error!("failed to delete chunk directory for abort: {err}");
+            return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to clean up upload chunks").into_response();
+        }
+        tracing::info!("Successfully aborted upload and cleaned up chunks for ID: {}", payload.upload_id);
+    }
+
+    (StatusCode::OK, Json(serde_json::json!({ "success": true }))).into_response()
+}
+
 pub fn spawn_filebox_cleanup_task(state: Arc<AppState>) {
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
             
+            // 1. Clean up expired files from database and disk
             let rows = sqlx::query("SELECT id FROM filebox_files WHERE expires_at < datetime('now')")
                 .fetch_all(&state.db)
                 .await;
@@ -515,6 +546,29 @@ pub fn spawn_filebox_cleanup_task(state: Arc<AppState>) {
                     .await
                 {
                     tracing::warn!("failed to delete expired filebox records from DB: {err}");
+                }
+            }
+
+            // 2. Clean up orphaned/abandoned directories in filebox_tmp older than 24 hours
+            let filebox_tmp_dir = state.cache_dir.join("filebox_tmp");
+            if let Ok(mut entries) = fs::read_dir(&filebox_tmp_dir).await {
+                while let Ok(Some(entry)) = entries.next_entry().await {
+                    if let Ok(metadata) = entry.metadata().await {
+                        if metadata.is_dir() {
+                            if let Ok(modified) = metadata.modified() {
+                                if let Ok(elapsed) = modified.elapsed() {
+                                    if elapsed.as_secs() > 86400 { // 24 hours
+                                        let path = entry.path();
+                                        if let Err(err) = fs::remove_dir_all(&path).await {
+                                            tracing::warn!("Failed to clean up old temporary chunk dir {}: {}", path.display(), err);
+                                        } else {
+                                            tracing::info!("Cleaned up abandoned temporary chunk dir: {}", path.display());
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
