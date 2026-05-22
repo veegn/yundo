@@ -25,7 +25,11 @@ pub fn build_router(state: Arc<AppState>, frontend_dist: PathBuf) -> Router {
         .route("/api/recent", get(history_handler))
         .route("/api/history", get(history_handler))
         .route("/api/filebox/files", get(crate::filebox::list_filebox_handler))
-        .route("/api/filebox/upload", axum::routing::post(crate::filebox::upload_filebox_handler))
+        .route(
+            "/api/filebox/upload",
+            axum::routing::post(crate::filebox::upload_filebox_handler)
+                .layer(axum::extract::DefaultBodyLimit::disable()),
+        )
         .route("/api/filebox/download/:id", get(crate::filebox::download_filebox_handler))
         .route("/api/filebox/delete/:id", axum::routing::delete(crate::filebox::delete_filebox_handler))
         .route("/healthz", get(health_handler))
