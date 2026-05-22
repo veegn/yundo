@@ -32,7 +32,7 @@ async fn main() {
         client,
         cache_dir: args.cache_dir.clone(),
         max_cache_size,
-        filebox_size: args.filebox_size,
+        filebox_size: max_cache_size,
         db: db.clone(),
         frontend_dist: args.frontend_dist.clone(),
         base_path: args.base_path.clone(),

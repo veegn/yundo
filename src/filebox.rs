@@ -38,17 +38,7 @@ fn generate_unique_id() -> String {
 pub async fn list_filebox_handler(
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
-    let row = sqlx::query("SELECT COALESCE(SUM(file_size), 0) AS total_size FROM filebox_files WHERE expires_at >= datetime('now')")
-        .fetch_one(&state.db)
-        .await;
-    
-    let used_space: i64 = match row {
-        Ok(r) => r.get("total_size"),
-        Err(err) => {
-            tracing::error!("failed to query used space: {err}");
-            return (StatusCode::INTERNAL_SERVER_ERROR, "Database error").into_response();
-        }
-    };
+    let used_space = crate::cache::get_combined_used_size(&state.cache_dir, &state.db).await;
 
     let rows = sqlx::query(
         "SELECT id, file_name, file_size, uploaded_at, expires_at FROM filebox_files WHERE expires_at >= datetime('now') ORDER BY uploaded_at DESC"
@@ -81,7 +71,7 @@ pub async fn list_filebox_handler(
     }).collect();
 
     (StatusCode::OK, Json(serde_json::json!({
-        "total_space": state.filebox_size,
+        "total_space": state.max_cache_size,
         "used_space": used_space,
         "files": files,
     }))).into_response()
@@ -111,17 +101,7 @@ pub async fn remote_upload_filebox_handler(
         return (StatusCode::FORBIDDEN, "access to local or private networks is forbidden").into_response();
     }
 
-    let row = sqlx::query("SELECT COALESCE(SUM(file_size), 0) AS total_size FROM filebox_files WHERE expires_at >= datetime('now')")
-        .fetch_one(&state.db)
-        .await;
-    
-    let used_space: i64 = match row {
-        Ok(r) => r.get("total_size"),
-        Err(err) => {
-            tracing::error!("failed to query used space: {err}");
-            return (StatusCode::INTERNAL_SERVER_ERROR, "Database error").into_response();
-        }
-    };
+    let initial_combined_used = crate::cache::get_combined_used_size(&state.cache_dir, &state.db).await;
 
     let upstream_request = state.client.get(&target_url)
         .header("User-Agent", "precision-proxy/1.0");
@@ -167,7 +147,7 @@ pub async fn remote_upload_filebox_handler(
     while let Some(chunk_result) = stream.next().await {
         match chunk_result {
             Ok(chunk) => {
-                if (used_space as u64) + size + (chunk.len() as u64) > state.filebox_size {
+                if initial_combined_used + size + (chunk.len() as u64) > state.max_cache_size {
                     quota_exceeded = true;
                     break;
                 }
@@ -229,17 +209,7 @@ pub async fn upload_filebox_handler(
     State(state): State<Arc<AppState>>,
     mut multipart: Multipart,
 ) -> impl IntoResponse {
-    let row = sqlx::query("SELECT COALESCE(SUM(file_size), 0) AS total_size FROM filebox_files WHERE expires_at >= datetime('now')")
-        .fetch_one(&state.db)
-        .await;
-
-    let used_space: i64 = match row {
-        Ok(r) => r.get("total_size"),
-        Err(err) => {
-            tracing::error!("failed to query used space: {err}");
-            return (StatusCode::INTERNAL_SERVER_ERROR, "Database error").into_response();
-        }
-    };
+    let initial_combined_used = crate::cache::get_combined_used_size(&state.cache_dir, &state.db).await;
 
     let mut uploaded_files = Vec::new();
 
@@ -260,7 +230,7 @@ pub async fn upload_filebox_handler(
         let mut quota_exceeded = false;
 
         while let Ok(Some(chunk)) = field.chunk().await {
-            if (used_space as u64) + size + (chunk.len() as u64) > state.filebox_size {
+            if initial_combined_used + size + (chunk.len() as u64) > state.max_cache_size {
                 quota_exceeded = true;
                 break;
             }

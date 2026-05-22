@@ -13,44 +13,78 @@ use tokio::{
 };
 use tokio_util::io::ReaderStream;
 
+use sqlx::Row;
+
+pub async fn get_combined_used_size(cache_dir: &Path, db: &sqlx::SqlitePool) -> u64 {
+    let mut proxy_cache_size = 0_u64;
+    // 1. Calculate proxy cache data files size
+    if let Ok(mut entries) = fs::read_dir(cache_dir).await {
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            if let Ok(metadata) = entry.metadata().await {
+                if metadata.is_file() && entry.path().extension().map_or(false, |ext| ext == "data") {
+                    proxy_cache_size += metadata.len();
+                }
+            }
+        }
+    }
+
+    // 2. Get active filebox files size from DB
+    let filebox_size = sqlx::query("SELECT COALESCE(SUM(file_size), 0) AS total_size FROM filebox_files WHERE expires_at >= datetime('now')")
+        .fetch_one(db)
+        .await
+        .map(|row| row.get::<i64, _>("total_size") as u64)
+        .unwrap_or(0);
+
+    proxy_cache_size + filebox_size
+}
+
 pub fn spawn_cache_eviction_task(state: Arc<AppState>) {
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
-            if let Err(err) = enforce_cache_size(&state.cache_dir, state.max_cache_size).await {
+            if let Err(err) = enforce_cache_size(&state).await {
                 tracing::error!("cache eviction failed: {err}");
             }
         }
     });
 }
 
-pub(crate) async fn enforce_cache_size(cache_dir: &Path, max_size: u64) -> std::io::Result<()> {
-    let mut total_size = 0;
+pub(crate) async fn enforce_cache_size(state: &AppState) -> std::io::Result<()> {
     let mut files = Vec::new();
+    let mut proxy_cache_size = 0_u64;
 
-    let mut entries = fs::read_dir(cache_dir).await?;
+    // 1. Calculate proxy cache files size and gather their modified dates
+    let mut entries = fs::read_dir(&state.cache_dir).await?;
     while let Some(entry) = entries.next_entry().await? {
         let metadata = entry.metadata().await?;
         if metadata.is_file() {
-            let size = metadata.len();
-            total_size += size;
-            let modified = metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
-            files.push((entry.path(), size, modified));
+            if entry.path().extension().map_or(false, |ext| ext == "data") {
+                let size = metadata.len();
+                proxy_cache_size += size;
+                let modified = metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+                files.push((entry.path(), size, modified));
+            }
         }
     }
 
-    if total_size <= max_size {
+    // 2. Get active filebox files size from DB
+    let filebox_size = sqlx::query("SELECT COALESCE(SUM(file_size), 0) AS total_size FROM filebox_files WHERE expires_at >= datetime('now')")
+        .fetch_one(&state.db)
+        .await
+        .map(|row| row.get::<i64, _>("total_size") as u64)
+        .unwrap_or(0);
+
+    let mut total_size = proxy_cache_size + filebox_size;
+
+    if total_size <= state.max_cache_size {
         return Ok(());
     }
 
-    // Only evict cache data files — never touch proxy.db or other non-cache files.
-    files.retain(|(path, _, _)| {
-        path.extension().map_or(false, |ext| ext == "data")
-    });
+    // 3. Sort files by modified time and evict oldest proxy cache files
     files.sort_by_key(|(_, _, modified)| *modified);
 
     for (path, size, _) in &files {
-        if total_size <= max_size {
+        if total_size <= state.max_cache_size {
             break;
         }
         // Remove the data file and its associated meta file together.
