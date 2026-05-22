@@ -105,8 +105,104 @@ export default function FileBox() {
       totalBytesAllFiles += files[i].size;
     }
     
-    let totalUploadedBytesAllFiles = 0;
+    let completedBytesAllFiles = 0;
+    const activeChunkUploadedBytes: { [key: string]: number } = {};
+    const activeXhrs: { [key: string]: XMLHttpRequest } = {};
+    const speedSamples: { timestamp: number; bytes: number }[] = [];
     const startTime = Date.now();
+
+    // Helper to calculate total real-time uploaded bytes and update UI smoothly
+    const updateProgressAndSpeed = () => {
+      let totalRealTimeBytes = completedBytesAllFiles;
+      for (const bytes of Object.values(activeChunkUploadedBytes)) {
+        totalRealTimeBytes += bytes;
+      }
+
+      // Update progress bar percentage (cap at 99% until complete merge)
+      const percent = Math.round((totalRealTimeBytes / totalBytesAllFiles) * 100);
+      setUploadProgress(Math.min(percent, 99));
+
+      const now = Date.now();
+      speedSamples.push({ timestamp: now, bytes: totalRealTimeBytes });
+
+      // Prune samples older than 2 seconds to get an accurate sliding-window speed
+      const cutoff = now - 2000;
+      while (speedSamples.length > 0 && speedSamples[0].timestamp < cutoff) {
+        speedSamples.shift();
+      }
+
+      if (speedSamples.length > 1) {
+        const first = speedSamples[0];
+        const last = speedSamples[speedSamples.length - 1];
+        const timeDiffSec = (last.timestamp - first.timestamp) / 1000;
+        const bytesDiff = last.bytes - first.bytes;
+
+        if (timeDiffSec > 0.2) {
+          const speedBytesPerSec = bytesDiff / timeDiffSec;
+          setUploadSpeed(`${formatBytes(speedBytesPerSec)}/s`);
+        }
+      } else {
+        const timeDiffSec = (now - startTime) / 1000;
+        if (timeDiffSec > 0.5) {
+          const speedBytesPerSec = totalRealTimeBytes / timeDiffSec;
+          setUploadSpeed(`${formatBytes(speedBytesPerSec)}/s`);
+        }
+      }
+    };
+
+    const uploadChunkWithXhr = (
+      chunk: Blob,
+      chunkIndex: number,
+      uploadId: string,
+      chunkKey: string
+    ): Promise<void> => {
+      return new Promise((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        xhr.open('POST', withBasePath('/api/filebox/upload-chunk'));
+
+        activeXhrs[chunkKey] = xhr;
+
+        xhr.upload.onprogress = (event) => {
+          if (event.lengthComputable) {
+            activeChunkUploadedBytes[chunkKey] = event.loaded;
+            updateProgressAndSpeed();
+          }
+        };
+
+        xhr.onload = () => {
+          delete activeXhrs[chunkKey];
+          if (xhr.status >= 200 && xhr.status < 300) {
+            activeChunkUploadedBytes[chunkKey] = chunk.size; // Ensure full chunk registered
+            updateProgressAndSpeed();
+            resolve();
+          } else {
+            let errText = xhr.responseText;
+            try {
+              const errObj = JSON.parse(errText);
+              errText = errObj.message || errText;
+            } catch (e) {}
+            reject(new Error(errText || t('filebox.err.upload_failed')));
+          }
+        };
+
+        xhr.onerror = () => {
+          delete activeXhrs[chunkKey];
+          reject(new Error(t('filebox.err.network')));
+        };
+
+        xhr.onabort = () => {
+          delete activeXhrs[chunkKey];
+          reject(new Error('Upload aborted'));
+        };
+
+        const formData = new FormData();
+        formData.append('upload_id', uploadId);
+        formData.append('chunk_index', chunkIndex.toString());
+        formData.append('file', chunk);
+
+        xhr.send(formData);
+      });
+    };
 
     for (let i = 0; i < files.length; i++) {
       const file = files[i];
@@ -126,39 +222,19 @@ export default function FileBox() {
           const start = chunkIndex * CHUNK_SIZE;
           const end = Math.min(start + CHUNK_SIZE, file.size);
           const chunk = file.slice(start, end);
-
-          const formData = new FormData();
-          formData.append('upload_id', uploadId);
-          formData.append('chunk_index', chunkIndex.toString());
-          formData.append('file', chunk);
+          const chunkKey = `${uploadId}-${chunkIndex}`;
 
           try {
-            const res = await fetch(withBasePath('/api/filebox/upload-chunk'), {
-              method: 'POST',
-              body: formData,
-            });
-
-            if (!res.ok) {
-              let errText = await res.text();
-              try {
-                const errObj = JSON.parse(errText);
-                errText = errObj.message || errText;
-              } catch (e) {}
-              throw new Error(errText || t('filebox.err.upload_failed'));
-            }
-
-            // Update progress
-            totalUploadedBytesAllFiles += chunk.size;
-            const percent = Math.round((totalUploadedBytesAllFiles / totalBytesAllFiles) * 100);
-            setUploadProgress(Math.min(percent, 99)); // Keep at 99% until fully merged
-
-            const duration = (Date.now() - startTime) / 1000;
-            if (duration > 0.5) {
-              const speedBytesPerSec = totalUploadedBytesAllFiles / duration;
-              setUploadSpeed(`${formatBytes(speedBytesPerSec)}/s`);
-            }
+            await uploadChunkWithXhr(chunk, chunkIndex, uploadId, chunkKey);
+            completedBytesAllFiles += chunk.size;
+            delete activeChunkUploadedBytes[chunkKey]; // Move from active map to completed baseline
+            updateProgressAndSpeed();
           } catch (err: any) {
             uploadError = err;
+            // Abort all in-flight XHRs immediately
+            for (const activeXhr of Object.values(activeXhrs)) {
+              activeXhr.abort();
+            }
             throw err;
           }
         }
