@@ -97,7 +97,7 @@ export default function FileBox() {
     setUploadProgress(0);
     setUploadSpeed(null);
 
-    const CHUNK_SIZE = 20 * 1024 * 1024; // 20MB chunks to bypass Cloudflare 100MB limit
+    const CHUNK_SIZE = 72 * 1024 * 1024; // 72MB chunks to bypass Cloudflare 100MB limit
     
     // Calculate total bytes across all files to upload
     let totalBytesAllFiles = 0;
