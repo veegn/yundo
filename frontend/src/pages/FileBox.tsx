@@ -91,55 +91,99 @@ export default function FileBox() {
     }
   };
 
-  const uploadFiles = (files: FileList) => {
+  const uploadFiles = async (files: FileList) => {
     setUploading(true);
     setErrorMessage(null);
     setUploadProgress(0);
     setUploadSpeed(null);
 
+    const CHUNK_SIZE = 20 * 1024 * 1024; // 20MB chunks to bypass Cloudflare 100MB limit
+    
+    // Calculate total bytes across all files to upload
+    let totalBytesAllFiles = 0;
+    for (let i = 0; i < files.length; i++) {
+      totalBytesAllFiles += files[i].size;
+    }
+    
+    let totalUploadedBytesAllFiles = 0;
     const startTime = Date.now();
 
-    const formData = new FormData();
     for (let i = 0; i < files.length; i++) {
-      formData.append('files', files[i]);
+      const file = files[i];
+      const totalChunks = Math.ceil(file.size / CHUNK_SIZE) || 1;
+      const uploadId = Math.random().toString(36).substring(2, 15) + Date.now().toString(36);
+
+      // Upload each chunk sequentially
+      for (let chunkIndex = 0; chunkIndex < totalChunks; chunkIndex++) {
+        const start = chunkIndex * CHUNK_SIZE;
+        const end = Math.min(start + CHUNK_SIZE, file.size);
+        const chunk = file.slice(start, end);
+
+        const formData = new FormData();
+        formData.append('upload_id', uploadId);
+        formData.append('chunk_index', chunkIndex.toString());
+        formData.append('file', chunk);
+
+        try {
+          const res = await fetch(withBasePath('/api/filebox/upload-chunk'), {
+            method: 'POST',
+            body: formData,
+          });
+
+          if (!res.ok) {
+            let errText = await res.text();
+            try {
+              const errObj = JSON.parse(errText);
+              errText = errObj.message || errText;
+            } catch (e) {}
+            throw new Error(errText || t('filebox.err.upload_failed'));
+          }
+
+          // Update progress
+          totalUploadedBytesAllFiles += chunk.size;
+          const percent = Math.round((totalUploadedBytesAllFiles / totalBytesAllFiles) * 100);
+          setUploadProgress(Math.min(percent, 99)); // Keep at 99% until fully merged
+
+          const duration = (Date.now() - startTime) / 1000;
+          if (duration > 0.5) {
+            const speedBytesPerSec = totalUploadedBytesAllFiles / duration;
+            setUploadSpeed(`${formatBytes(speedBytesPerSec)}/s`);
+          }
+        } catch (err: any) {
+          setUploading(false);
+          setErrorMessage(err.message || t('filebox.err.network'));
+          return; // Stop processing further chunks and files
+        }
+      }
+
+      // Signal upload completion for this file to merge chunks
+      try {
+        const resComplete = await fetch(withBasePath('/api/filebox/upload-complete'), {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            upload_id: uploadId,
+            file_name: file.name,
+            total_chunks: totalChunks
+          })
+        });
+
+        if (!resComplete.ok) {
+           let errText = await resComplete.text();
+           throw new Error(errText || t('filebox.err.upload_failed'));
+        }
+      } catch (err: any) {
+        setUploading(false);
+        setErrorMessage(err.message || t('filebox.err.network'));
+        return;
+      }
     }
 
-    const xhr = new XMLHttpRequest();
-    xhr.open('POST', withBasePath('/api/filebox/upload'), true);
-
-    xhr.upload.onprogress = (e) => {
-      if (e.lengthComputable) {
-        const percent = Math.round((e.loaded / e.total) * 100);
-        setUploadProgress(percent);
-
-        const duration = (Date.now() - startTime) / 1000;
-        if (duration > 0.1) {
-          const speedBytesPerSec = e.loaded / duration;
-          setUploadSpeed(`${formatBytes(speedBytesPerSec)}/s`);
-        }
-      }
-    };
-
-    xhr.onload = () => {
-      setUploading(false);
-      if (xhr.status === 200) {
-        fetchFiles();
-      } else {
-        try {
-          const res = JSON.parse(xhr.responseText);
-          setErrorMessage(res.message || t('filebox.err.upload_failed'));
-        } catch {
-          setErrorMessage(t('filebox.err.upload_failed'));
-        }
-      }
-    };
-
-    xhr.onerror = () => {
-      setUploading(false);
-      setErrorMessage(t('filebox.err.network'));
-    };
-
-    xhr.send(formData);
+    setUploadProgress(100);
+    setUploading(false);
+    fetchFiles();
   };
 
   const handleRemoteSubmit = (e: React.FormEvent) => {

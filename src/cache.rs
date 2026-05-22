@@ -35,7 +35,25 @@ pub async fn get_combined_used_size(cache_dir: &Path, db: &sqlx::SqlitePool) -> 
         .map(|row| row.get::<i64, _>("total_size") as u64)
         .unwrap_or(0);
 
-    proxy_cache_size + filebox_size
+    // 3. Calculate filebox_tmp size (in-progress chunked uploads)
+    let filebox_tmp_dir = cache_dir.join("filebox_tmp");
+    let mut tmp_size = 0_u64;
+    let mut dirs_to_visit = vec![filebox_tmp_dir];
+    while let Some(dir) = dirs_to_visit.pop() {
+        if let Ok(mut entries) = fs::read_dir(&dir).await {
+            while let Ok(Some(entry)) = entries.next_entry().await {
+                if let Ok(metadata) = entry.metadata().await {
+                    if metadata.is_dir() {
+                        dirs_to_visit.push(entry.path());
+                    } else if metadata.is_file() {
+                        tmp_size += metadata.len();
+                    }
+                }
+            }
+        }
+    }
+
+    proxy_cache_size + filebox_size + tmp_size
 }
 
 pub fn spawn_cache_eviction_task(state: Arc<AppState>) {

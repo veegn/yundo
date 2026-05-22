@@ -31,6 +31,16 @@ pub fn build_router(state: Arc<AppState>, frontend_dist: PathBuf) -> Router {
                 .layer(axum::extract::DefaultBodyLimit::disable()),
         )
         .route(
+            "/api/filebox/upload-chunk",
+            axum::routing::post(crate::filebox::upload_chunk_handler)
+                .layer(axum::extract::DefaultBodyLimit::disable()),
+        )
+        .route(
+            "/api/filebox/upload-complete",
+            axum::routing::post(crate::filebox::upload_complete_handler)
+                .layer(axum::extract::DefaultBodyLimit::disable()),
+        )
+        .route(
             "/api/filebox/remote-upload",
             axum::routing::post(crate::filebox::remote_upload_filebox_handler),
         )

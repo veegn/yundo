@@ -357,6 +357,132 @@ pub async fn delete_filebox_handler(
     (StatusCode::OK, Json(serde_json::json!({ "success": true }))).into_response()
 }
 
+#[derive(serde::Deserialize)]
+pub struct UploadCompletePayload {
+    pub upload_id: String,
+    pub file_name: String,
+    pub total_chunks: usize,
+}
+
+pub async fn upload_chunk_handler(
+    State(state): State<Arc<AppState>>,
+    mut multipart: Multipart,
+) -> impl IntoResponse {
+    let mut upload_id = String::new();
+    let mut chunk_index = 0_usize;
+    let mut chunk_data = Vec::new();
+
+    let initial_combined_used = crate::cache::get_combined_used_size(&state.cache_dir, &state.db).await;
+
+    while let Ok(Some(field)) = multipart.next_field().await {
+        match field.name() {
+            Some("upload_id") => upload_id = field.text().await.unwrap_or_default(),
+            Some("chunk_index") => chunk_index = field.text().await.unwrap_or_default().parse().unwrap_or(0),
+            Some("file") => chunk_data = field.bytes().await.unwrap_or_default().to_vec(),
+            _ => {}
+        }
+    }
+
+    if upload_id.is_empty() || chunk_data.is_empty() {
+        return (StatusCode::BAD_REQUEST, "Missing chunk metadata").into_response();
+    }
+
+    if initial_combined_used + (chunk_data.len() as u64) > state.max_cache_size {
+        return (
+            StatusCode::BAD_REQUEST,
+            "存储空间不足，无法上传分片。请清理空间或提高配额。",
+        ).into_response();
+    }
+
+    let chunk_dir = state.cache_dir.join("filebox_tmp").join(&upload_id);
+    if let Err(err) = fs::create_dir_all(&chunk_dir).await {
+        tracing::error!("failed to create chunk directory: {err}");
+        return (StatusCode::INTERNAL_SERVER_ERROR, "Disk error").into_response();
+    }
+
+    let chunk_path = chunk_dir.join(chunk_index.to_string());
+    if let Err(err) = fs::write(&chunk_path, chunk_data).await {
+        tracing::error!("failed to write chunk to disk: {err}");
+        return (StatusCode::INTERNAL_SERVER_ERROR, "Disk write error").into_response();
+    }
+
+    (StatusCode::OK, Json(serde_json::json!({ "success": true }))).into_response()
+}
+
+pub async fn upload_complete_handler(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<UploadCompletePayload>,
+) -> impl IntoResponse {
+    let id = generate_unique_id();
+    let file_path = state.cache_dir.join("filebox").join(&id);
+    let chunk_dir = state.cache_dir.join("filebox_tmp").join(&payload.upload_id);
+
+    if !chunk_dir.exists() {
+        return (StatusCode::BAD_REQUEST, "No chunks found").into_response();
+    }
+
+    let mut final_file = match File::create(&file_path).await {
+        Ok(f) => f,
+        Err(err) => {
+            tracing::error!("failed to create final file: {err}");
+            return (StatusCode::INTERNAL_SERVER_ERROR, "Disk error").into_response();
+        }
+    };
+
+    let mut total_size = 0_u64;
+
+    for i in 0..payload.total_chunks {
+        let chunk_path = chunk_dir.join(i.to_string());
+        let chunk_data = match fs::read(&chunk_path).await {
+            Ok(data) => data,
+            Err(_) => {
+                let _ = fs::remove_file(&file_path).await;
+                return (StatusCode::BAD_REQUEST, format!("Missing chunk: {}", i)).into_response();
+            }
+        };
+
+        if let Err(err) = final_file.write_all(&chunk_data).await {
+            tracing::error!("failed to write to final file: {err}");
+            let _ = fs::remove_file(&file_path).await;
+            return (StatusCode::INTERNAL_SERVER_ERROR, "Disk write error").into_response();
+        }
+        total_size += chunk_data.len() as u64;
+    }
+
+    // Cleanup tmp dir
+    let _ = fs::remove_dir_all(&chunk_dir).await;
+
+    if total_size == 0 {
+        let _ = fs::remove_file(&file_path).await;
+        return (StatusCode::BAD_REQUEST, "合并文件大小为 0").into_response();
+    }
+
+    if let Err(err) = sqlx::query(
+        "INSERT INTO filebox_files (id, file_name, file_size, expires_at)
+         VALUES (?, ?, ?, datetime('now', '+7 days'))"
+    )
+    .bind(&id)
+    .bind(&payload.file_name)
+    .bind(total_size as i64)
+    .execute(&state.db)
+    .await
+    {
+        tracing::error!("failed to insert upload metadata to DB: {err}");
+        let _ = fs::remove_file(&file_path).await;
+        return (StatusCode::INTERNAL_SERVER_ERROR, "Database record error").into_response();
+    }
+
+    (StatusCode::OK, Json(serde_json::json!({
+        "success": true,
+        "files": [{
+            "id": id,
+            "file_name": payload.file_name,
+            "file_size": total_size,
+        }]
+    })))
+    .into_response()
+}
+
 pub fn spawn_filebox_cleanup_task(state: Arc<AppState>) {
     tokio::spawn(async move {
         loop {
