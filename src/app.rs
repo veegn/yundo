@@ -63,16 +63,20 @@ pub fn build_router(state: Arc<AppState>, frontend_dist: PathBuf) -> Router {
             .fallback(get(base_aware_not_found_handler));
     }
 
-    let inner_router = inner_router.with_state(state.clone());
+    let inner_router = inner_router
+        .layer(axum::extract::DefaultBodyLimit::disable())
+        .with_state(state.clone());
 
-    if state.base_path == "/" {
+    let final_router = if state.base_path == "/" {
         inner_router
     } else {
         let redirect_target = state.base_path.clone();
         Router::new()
             .route("/", get(move || async move { Redirect::permanent(&redirect_target) }))
             .nest(&state.base_path, inner_router)
-    }
+    };
+
+    final_router.layer(axum::extract::DefaultBodyLimit::disable())
 }
 
 async fn spa_index_handler(
