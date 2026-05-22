@@ -32,6 +32,9 @@ export default function FileBox() {
   const [dragActive, setDragActive] = useState(false);
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [showRemoteForm, setShowRemoteForm] = useState(false);
+  const [remoteUrl, setRemoteUrl] = useState('');
+  const [remoteTransferring, setRemoteTransferring] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   useSeo({
@@ -137,6 +140,45 @@ export default function FileBox() {
     };
 
     xhr.send(formData);
+  };
+
+  const handleRemoteSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!remoteUrl.trim()) return;
+
+    if (!remoteUrl.startsWith('http://') && !remoteUrl.startsWith('https://')) {
+      setErrorMessage(t('filebox.remote.err_invalid'));
+      return;
+    }
+
+    setRemoteTransferring(true);
+    setErrorMessage(null);
+
+    fetch(withBasePath('/api/filebox/remote-upload'), {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ url: remoteUrl.trim() }),
+    })
+      .then(async (res) => {
+        if (!res.ok) {
+          const errText = await res.text();
+          throw new Error(errText || `HTTP error! status: ${res.status}`);
+        }
+        return res.json();
+      })
+      .then((data) => {
+        setRemoteTransferring(false);
+        setRemoteUrl('');
+        setShowRemoteForm(false);
+        fetchFiles();
+      })
+      .catch((err) => {
+        console.error(err);
+        setRemoteTransferring(false);
+        setErrorMessage(err.message || t('filebox.err.upload_failed'));
+      });
   };
 
   const handleDelete = (id: string) => {
@@ -247,6 +289,60 @@ export default function FileBox() {
           </div>
         )}
 
+        {/* Toggle option for Remote URL transfer / Local upload */}
+        <div className="flex justify-center gap-4 mb-6">
+          <button
+            onClick={() => setShowRemoteForm(!showRemoteForm)}
+            disabled={uploading || remoteTransferring}
+            className={`px-5 py-2.5 rounded-xl font-bold flex items-center gap-2 transition-all duration-300 border cursor-pointer shadow-sm text-sm ${
+              showRemoteForm
+                ? 'bg-secondary-fixed text-on-secondary-fixed border-secondary-fixed scale-[0.98]'
+                : 'bg-surface-container-low text-on-surface-variant hover:text-on-surface border-outline-variant/30 hover:border-outline-variant/60'
+            } ${(uploading || remoteTransferring) ? 'opacity-50 cursor-not-allowed' : ''}`}
+          >
+            <span className="material-symbols-outlined text-lg">link</span>
+            <span>{t('filebox.remote.btn')}</span>
+          </button>
+        </div>
+
+        {showRemoteForm && (
+          <div className="bg-surface-container-low p-6 rounded-2xl ghost-border ghost-shadow text-left mb-6 animate-in slide-in-from-top-4 duration-300">
+            <div className="flex justify-between items-center mb-3">
+              <span className="text-sm font-bold text-on-surface flex items-center gap-1.5">
+                <span className="material-symbols-outlined text-secondary text-lg">link</span>
+                {t('filebox.remote.btn')}
+              </span>
+            </div>
+            <form onSubmit={handleRemoteSubmit} className="flex flex-col sm:flex-row gap-3">
+              <input
+                type="text"
+                value={remoteUrl}
+                onChange={(e) => setRemoteUrl(e.target.value)}
+                placeholder={t('filebox.remote.placeholder')}
+                disabled={remoteTransferring}
+                className="flex-grow bg-surface-container-high text-on-surface border border-outline-variant/40 focus:border-secondary focus:ring-1 focus:ring-secondary rounded-xl py-3 px-4 outline-none transition-all placeholder:text-on-surface-variant/40 text-sm font-medium"
+              />
+              <button
+                type="submit"
+                disabled={remoteTransferring || !remoteUrl.trim()}
+                className="bg-secondary-fixed text-on-secondary-fixed hover:opacity-90 disabled:opacity-50 font-bold px-6 py-3 rounded-xl transition-all flex items-center justify-center gap-2 shrink-0 cursor-pointer text-sm shadow-sm"
+              >
+                {remoteTransferring ? (
+                  <>
+                    <div className="w-4 h-4 border-2 border-on-secondary-fixed border-t-transparent rounded-full animate-spin"></div>
+                    <span>{t('filebox.remote.transferring')}</span>
+                  </>
+                ) : (
+                  <>
+                    <span className="material-symbols-outlined text-lg">cloud_download</span>
+                    <span>{t('filebox.remote.btn')}</span>
+                  </>
+                )}
+              </button>
+            </form>
+          </div>
+        )}
+
         {/* Drag and Drop Zone */}
         <div
           onDragEnter={handleDrag}
@@ -258,7 +354,7 @@ export default function FileBox() {
             dragActive
               ? 'border-secondary bg-secondary/5 scale-[1.01]'
               : 'border-outline-variant/60 hover:border-secondary hover:bg-surface-container-low'
-          } ${uploading ? 'pointer-events-none' : ''}`}
+          } ${(uploading || remoteTransferring) ? 'pointer-events-none' : ''}`}
         >
           <input
             ref={fileInputRef}
