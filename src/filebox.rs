@@ -12,7 +12,7 @@ use std::sync::{
 use std::time::SystemTime;
 use crate::common::{AppState, is_forbidden_host, resolve_file_name};
 use tokio::fs::{self, File};
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio_util::io::ReaderStream;
 use sqlx::Row;
 use futures_util::StreamExt;
@@ -289,8 +289,81 @@ pub async fn upload_filebox_handler(
     .into_response()
 }
 
+fn parse_range(range_header: &str, file_size: u64) -> Option<(u64, u64)> {
+    if !range_header.starts_with("bytes=") {
+        return None;
+    }
+    let range_str = &range_header["bytes=".len()..];
+    let first_range = range_str.split(',').next()?.trim();
+    let parts: Vec<&str> = first_range.split('-').collect();
+    if parts.len() != 2 {
+        return None;
+    }
+    let start_str = parts[0].trim();
+    let end_str = parts[1].trim();
+
+    if start_str.is_empty() && end_str.is_empty() {
+        return None;
+    }
+
+    if start_str.is_empty() {
+        let suffix_len = end_str.parse::<u64>().ok()?;
+        if suffix_len == 0 {
+            return None;
+        }
+        let start = if file_size > suffix_len {
+            file_size - suffix_len
+        } else {
+            0
+        };
+        Some((start, file_size.saturating_sub(1)))
+    } else if end_str.is_empty() {
+        let start = start_str.parse::<u64>().ok()?;
+        if start >= file_size {
+            return None;
+        }
+        Some((start, file_size.saturating_sub(1)))
+    } else {
+        let start = start_str.parse::<u64>().ok()?;
+        let mut end = end_str.parse::<u64>().ok()?;
+        if start >= file_size || start > end {
+            return None;
+        }
+        if end >= file_size {
+            end = file_size.saturating_sub(1);
+        }
+        Some((start, end))
+    }
+}
+
+fn is_range_out_of_bounds(range_header: &str, file_size: u64) -> bool {
+    if !range_header.starts_with("bytes=") {
+        return false;
+    }
+    let range_str = &range_header["bytes=".len()..];
+    let first_range = match range_str.split(',').next() {
+        Some(r) => r.trim(),
+        None => return false,
+    };
+    let parts: Vec<&str> = first_range.split('-').collect();
+    if parts.len() != 2 {
+        return false;
+    }
+    let start_str = parts[0].trim();
+
+    if !start_str.is_empty() {
+        if let Ok(start) = start_str.parse::<u64>() {
+            if start >= file_size {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 pub async fn download_filebox_handler(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> impl IntoResponse {
     let row = sqlx::query(
@@ -314,21 +387,56 @@ pub async fn download_filebox_handler(
     };
 
     let file_path = state.cache_dir.join("filebox").join(&id);
-    let file = match File::open(&file_path).await {
+    let mut file = match File::open(&file_path).await {
         Ok(f) => f,
         Err(_) => return (StatusCode::NOT_FOUND, "本地文件丢失").into_response(),
     };
 
+    let file_size_u64 = file_size as u64;
+
     let mut response_headers = HeaderMap::new();
+    response_headers.insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
+
     let content_disposition = crate::common::build_content_disposition(&file_name);
     if let Ok(value) = HeaderValue::try_from(content_disposition) {
         response_headers.insert(header::CONTENT_DISPOSITION, value);
     }
     response_headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("application/octet-stream"));
-    response_headers.insert(header::CONTENT_LENGTH, HeaderValue::from(file_size));
 
-    let body = Body::from_stream(ReaderStream::new(file));
-    (StatusCode::OK, response_headers, body).into_response()
+    if let Some(range_header) = headers.get(header::RANGE).and_then(|h| h.to_str().ok()) {
+        if let Some((start, end)) = parse_range(range_header, file_size_u64) {
+            let chunk_size = end - start + 1;
+            if let Err(err) = file.seek(std::io::SeekFrom::Start(start)).await {
+                tracing::error!("failed to seek file to {start}: {err}");
+                return (StatusCode::INTERNAL_SERVER_ERROR, "Seek error").into_response();
+            }
+
+            response_headers.insert(
+                header::CONTENT_RANGE,
+                HeaderValue::from_str(&format!("bytes {start}-{end}/{file_size_u64}")).unwrap(),
+            );
+            response_headers.insert(header::CONTENT_LENGTH, HeaderValue::from(chunk_size));
+
+            let body = Body::from_stream(ReaderStream::new(file.take(chunk_size)));
+            (StatusCode::PARTIAL_CONTENT, response_headers, body).into_response()
+        } else {
+            if is_range_out_of_bounds(range_header, file_size_u64) {
+                response_headers.insert(
+                    header::CONTENT_RANGE,
+                    HeaderValue::from_str(&format!("bytes */{file_size_u64}")).unwrap(),
+                );
+                return (StatusCode::RANGE_NOT_SATISFIABLE, response_headers, Body::empty()).into_response();
+            }
+
+            response_headers.insert(header::CONTENT_LENGTH, HeaderValue::from(file_size));
+            let body = Body::from_stream(ReaderStream::new(file));
+            (StatusCode::OK, response_headers, body).into_response()
+        }
+    } else {
+        response_headers.insert(header::CONTENT_LENGTH, HeaderValue::from(file_size));
+        let body = Body::from_stream(ReaderStream::new(file));
+        (StatusCode::OK, response_headers, body).into_response()
+    }
 }
 
 pub async fn delete_filebox_handler(

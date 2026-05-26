@@ -400,3 +400,74 @@ async fn count_cache_data_files(cache_dir: &Path) -> usize {
     }
     count
 }
+
+#[tokio::test]
+async fn filebox_range_requests_supported() {
+    let cache_dir = TempDir::new().unwrap();
+    let app = spawn_proxy_server(
+        cache_dir.path().to_path_buf(),
+        "127.0.0.1:9".parse().unwrap(),
+        "/".to_string(),
+    )
+    .await;
+
+    // 1. Manually insert file into DB and disk to bypass upload logic for testing download range
+    let db = initialize_database(&cache_dir.path().to_path_buf()).await;
+    let id = "testfile12345678";
+    let file_name = "test_data.txt";
+    let file_content = b"abcdefghijklmnopqrstuvwxyz"; // 26 bytes
+    let file_size = file_content.len() as i64;
+
+    // Write file to disk
+    let filebox_dir = cache_dir.path().join("filebox");
+    fs::create_dir_all(&filebox_dir).await.unwrap();
+    fs::write(filebox_dir.join(id), file_content).await.unwrap();
+
+    // Insert to database
+    sqlx::query(
+        "INSERT INTO filebox_files (id, file_name, file_size, expires_at)
+         VALUES (?, ?, ?, datetime('now', '+1 day'))"
+    )
+    .bind(id)
+    .bind(file_name)
+    .bind(file_size)
+    .execute(&db)
+    .await
+    .unwrap();
+
+    let client = Client::new();
+    let download_url = format!("http://{app}/api/filebox/download/{id}");
+
+    // Test 1: Full Download (no range)
+    let res = client.get(&download_url).send().await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(res.headers().get("accept-ranges").unwrap(), "bytes");
+    assert_eq!(res.headers().get("content-length").unwrap(), "26");
+    assert_eq!(res.text().await.unwrap(), "abcdefghijklmnopqrstuvwxyz");
+
+    // Test 2: Range Download (bytes=0-4)
+    let res = client.get(&download_url).header("Range", "bytes=0-4").send().await.unwrap();
+    assert_eq!(res.status(), StatusCode::PARTIAL_CONTENT);
+    assert_eq!(res.headers().get("content-range").unwrap(), "bytes 0-4/26");
+    assert_eq!(res.headers().get("content-length").unwrap(), "5");
+    assert_eq!(res.text().await.unwrap(), "abcde");
+
+    // Test 3: Range Download (bytes=20-)
+    let res = client.get(&download_url).header("Range", "bytes=20-").send().await.unwrap();
+    assert_eq!(res.status(), StatusCode::PARTIAL_CONTENT);
+    assert_eq!(res.headers().get("content-range").unwrap(), "bytes 20-25/26");
+    assert_eq!(res.headers().get("content-length").unwrap(), "6");
+    assert_eq!(res.text().await.unwrap(), "uvwxyz");
+
+    // Test 4: Range Download (bytes=-5) (last 5 bytes)
+    let res = client.get(&download_url).header("Range", "bytes=-5").send().await.unwrap();
+    assert_eq!(res.status(), StatusCode::PARTIAL_CONTENT);
+    assert_eq!(res.headers().get("content-range").unwrap(), "bytes 21-25/26");
+    assert_eq!(res.headers().get("content-length").unwrap(), "5");
+    assert_eq!(res.text().await.unwrap(), "vwxyz");
+
+    // Test 5: Range Download Out of Bounds (bytes=100-) -> 416
+    let res = client.get(&download_url).header("Range", "bytes=100-").send().await.unwrap();
+    assert_eq!(res.status(), StatusCode::RANGE_NOT_SATISFIABLE);
+    assert_eq!(res.headers().get("content-range").unwrap(), "bytes */26");
+}
