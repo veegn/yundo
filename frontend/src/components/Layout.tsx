@@ -46,19 +46,7 @@ export default function Layout() {
                   <span className="absolute bottom-0 left-0 w-full h-0.5 bg-primary rounded-full" />
                 )}
               </Link>
-              <Link
-                to="/proxydash"
-                className={`transition-all relative py-1 ${
-                  location.pathname === '/proxydash'
-                    ? 'text-on-surface'
-                    : 'text-on-surface-variant hover:text-primary'
-                }`}
-              >
-                {t('nav.history')}
-                {location.pathname === '/proxydash' && (
-                  <span className="absolute bottom-0 left-0 w-full h-0.5 bg-primary rounded-full" />
-                )}
-              </Link>
+
               <Link
                 to="/filebox"
                 className={`transition-all relative py-1 ${

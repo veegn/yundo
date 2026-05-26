@@ -9,3 +9,6 @@ coverage/
 !.env.example
 target/
 cache/
+.claude/
+tmpclaude-*
+frontend/tmpclaude-*

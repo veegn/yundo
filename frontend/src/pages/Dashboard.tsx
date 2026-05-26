@@ -35,7 +35,7 @@ export default function Dashboard() {
         return res.json();
       })
       .then((data) => {
-        setHistory(data.slice(0, 3));
+        setHistory(data.slice(0, 5));
         setLoading(false);
       })
       .catch((err) => {
@@ -87,21 +87,6 @@ export default function Dashboard() {
       <section className="w-full max-w-4xl">
         <div className="flex justify-between items-end mb-6">
           <h2 className="text-xl font-bold text-on-surface">{t('dashboard.hot_downloads')}</h2>
-          <div className="flex items-center gap-4">
-            <a
-              href={withBasePath('/downloads')}
-              className="text-sm font-medium text-secondary flex items-center gap-1 hover:underline underline-offset-4 transition-all"
-            >
-              {t('dashboard.browse_resources')}
-            </a>
-            <Link
-              to="/proxydash"
-              className="text-sm font-medium text-secondary flex items-center gap-1 hover:underline underline-offset-4 transition-all"
-            >
-              {t('dashboard.view_all_history')}
-              <span className="material-symbols-outlined text-xs">arrow_forward</span>
-            </Link>
-          </div>
         </div>
 
         <div className="bg-surface-container-low rounded-xl overflow-hidden">
@@ -129,14 +114,12 @@ export default function Dashboard() {
                       )}
                     </div>
                     <div className="overflow-hidden">
-                      <a
-                        href={withBasePath(`/downloads/${item.slug}`)}
-                        className="font-bold text-sm text-on-surface truncate block hover:text-[#0058BB]"
+                      <span
+                        className="font-bold text-sm text-on-surface truncate block hover:text-primary transition-colors"
                         title={item.file_name}
-                        onClick={(e) => e.stopPropagation()}
                       >
                         {item.file_name}
-                      </a>
+                      </span>
                       <p
                         className="text-xs text-on-surface-variant font-mono truncate max-w-[200px] sm:max-w-xs md:max-w-md"
                         title={item.url}
@@ -167,13 +150,6 @@ export default function Dashboard() {
                     >
                       <span className="material-symbols-outlined text-sm">download</span>
                     </button>
-                    <a
-                      href={withBasePath(`/downloads/${item.slug}`)}
-                      className="text-xs text-secondary font-medium hover:underline"
-                      onClick={(e) => e.stopPropagation()}
-                    >
-                      {t('dashboard.detail')}
-                    </a>
                   </div>
                 </div>
               ))
