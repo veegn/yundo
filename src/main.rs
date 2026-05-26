@@ -2,6 +2,7 @@ use clap::Parser;
 use precision_proxy::{
     app, cache,
     common::{initialize_cache_dir, initialize_database, parse_socket_addr, AppState, Args},
+    history::spawn_history_cleanup_task,
 };
 use reqwest::Client;
 use std::sync::Arc;
@@ -38,6 +39,7 @@ async fn main() {
     });
     cache::spawn_cache_eviction_task(state.clone());
     precision_proxy::filebox::spawn_filebox_cleanup_task(state.clone());
+    spawn_history_cleanup_task(db);
 
     let app = app::build_router(state, args.frontend_dist.clone());
     let addr = parse_socket_addr(&args.host, args.port);

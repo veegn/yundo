@@ -4,6 +4,7 @@ use crate::{
         build_content_disposition, ensure_download_filename, extract_filename_from_url,
         is_forbidden_host, resolve_file_name, AppState, ProxyQuery, ALLOWED_HEADERS,
     },
+    history::record_download,
 };
 use axum::{
     body::Body,
@@ -145,6 +146,14 @@ pub(crate) async fn proxy_handler(
         status: status.as_u16(),
     };
     let should_cache = status.is_success() && !is_range_request;
+    if status.is_success() {
+        let db_clone = state.db.clone();
+        let target_url_clone = target_url.clone();
+        let file_name_clone = file_name.clone();
+        tokio::spawn(async move {
+            record_download(db_clone, target_url_clone, file_name_clone, file_size).await;
+        });
+    }
     let mut stream = upstream_response.bytes_stream();
     let (tx, rx) = mpsc::channel::<Result<Bytes, std::io::Error>>(16);
 

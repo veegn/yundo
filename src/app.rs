@@ -1,5 +1,6 @@
 use crate::{
     common::{health_handler, root_handler, AppState},
+    history::history_handler,
     proxy::{proxy_handler, proxy_head_handler},
 };
 use axum::{
@@ -20,6 +21,7 @@ use tower_http::{
 pub fn build_router(state: Arc<AppState>, frontend_dist: PathBuf) -> Router {
     let mut inner_router = Router::new()
         .route("/api/proxy", get(proxy_handler).head(proxy_head_handler))
+        .route("/api/recent", get(history_handler))
         .route("/api/filebox/files", get(crate::filebox::list_filebox_handler))
         .route(
             "/api/filebox/upload",
