@@ -8,4 +8,4 @@ pub use db::{
 };
 
 // HTTP handlers — re-exported for use in app.rs.
-pub use routes::{history_handler, resource_detail_handler, resources_index_handler};
+pub use routes::history_handler;

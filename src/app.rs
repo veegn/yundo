@@ -1,6 +1,6 @@
 use crate::{
     common::{health_handler, root_handler, AppState},
-    history::{history_handler, resource_detail_handler, resources_index_handler},
+    history::history_handler,
     proxy::{proxy_handler, proxy_head_handler},
     seo::{prefix_path, robots_txt_handler, sitemap_xml_handler},
 };
@@ -23,7 +23,6 @@ pub fn build_router(state: Arc<AppState>, frontend_dist: PathBuf) -> Router {
     let mut inner_router = Router::new()
         .route("/api/proxy", get(proxy_handler).head(proxy_head_handler))
         .route("/api/recent", get(history_handler))
-        .route("/api/history", get(history_handler))
         .route("/api/filebox/files", get(crate::filebox::list_filebox_handler))
         .route(
             "/api/filebox/upload",
@@ -53,8 +52,6 @@ pub fn build_router(state: Arc<AppState>, frontend_dist: PathBuf) -> Router {
         .route("/healthz", get(health_handler))
         .route("/robots.txt", get(robots_txt_handler))
         .route("/sitemap.xml", get(sitemap_xml_handler))
-        .route("/downloads", get(resources_index_handler))
-        .route("/downloads/:slug", get(resource_detail_handler))
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http());
 
@@ -62,7 +59,6 @@ pub fn build_router(state: Arc<AppState>, frontend_dist: PathBuf) -> Router {
         tracing::info!("serving frontend assets from {}", frontend_dist.display());
         inner_router = inner_router
             .route("/", get(spa_index_handler))
-            .route("/proxydash", get(spa_index_handler))
             .route("/filebox", get(spa_index_handler))
             .route("/index.html", get(spa_index_handler))
             .nest_service("/assets", ServeDir::new(frontend_dist.join("assets")))

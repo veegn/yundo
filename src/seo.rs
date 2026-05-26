@@ -1,4 +1,4 @@
-use crate::{common::AppState, history::load_ranked_history_items};
+use crate::common::AppState;
 use axum::{
     extract::State,
     http::{header, HeaderMap, StatusCode},
@@ -12,7 +12,7 @@ pub async fn robots_txt_handler(
 ) -> impl IntoResponse {
     let base_url = derive_base_url(&headers, &state.base_path);
     let body = format!(
-        "User-agent: *\nAllow: /\nAllow: /proxydash\nAllow: /downloads\nAllow: /downloads/\nDisallow: /api/\nDisallow: /healthz\nSitemap: {base_url}/sitemap.xml\n"
+        "User-agent: *\nAllow: /\nDisallow: /api/\nDisallow: /healthz\nSitemap: {base_url}/sitemap.xml\n"
     );
 
     (
@@ -27,17 +27,6 @@ pub async fn sitemap_xml_handler(
     headers: HeaderMap,
 ) -> impl IntoResponse {
     let base_url = derive_base_url(&headers, &state.base_path);
-    let detail_entries = load_ranked_history_items(&state.db, None)
-        .await
-        .into_iter()
-        .map(|item| {
-            format!(
-                "  <url>\n    <loc>{base_url}/downloads/{slug}</loc>\n    <changefreq>daily</changefreq>\n    <priority>0.7</priority>\n  </url>",
-                slug = xml_escape(&item.slug)
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
 
     let body = format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -47,17 +36,6 @@ pub async fn sitemap_xml_handler(
     <changefreq>daily</changefreq>
     <priority>1.0</priority>
   </url>
-  <url>
-    <loc>{base_url}/proxydash</loc>
-    <changefreq>hourly</changefreq>
-    <priority>0.8</priority>
-  </url>
-  <url>
-    <loc>{base_url}/downloads</loc>
-    <changefreq>hourly</changefreq>
-    <priority>0.9</priority>
-  </url>
-{detail_entries}
 </urlset>"#
     );
 
@@ -139,13 +117,4 @@ fn normalize_base_path(input: &str) -> Option<String> {
     }
 
     Some(path)
-}
-
-fn xml_escape(input: &str) -> String {
-    input
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&apos;")
 }
