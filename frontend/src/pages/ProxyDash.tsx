@@ -1,6 +1,5 @@
 import { useState, useEffect } from 'react';
 import { formatBytes, formatDate, getIconForFileName } from '../utils/formatters';
-import { useSeo } from '../utils/seo';
 import { withBasePath } from '../utils/basePath';
 import { useI18n } from '../context/I18nContext';
 
@@ -18,13 +17,6 @@ export default function ProxyDash() {
   const [history, setHistory] = useState<HistoryItem[]>([]);
   const [loading, setLoading] = useState(true);
   const { locale, t } = useI18n();
-
-  useSeo({
-    title: t('seo.proxydash.title'),
-    description: t('seo.proxydash.description'),
-    canonicalPath: '/proxydash',
-    keywords: t('seo.proxydash.keywords'),
-  });
 
   useEffect(() => {
     fetch(withBasePath('/api/recent'))

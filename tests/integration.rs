@@ -31,103 +31,7 @@ async fn parse_cache_size_supports_human_readable_units() {
     assert!(parse_cache_size("12XB").is_err());
 }
 
-#[tokio::test]
-async fn robots_txt_disallows_api_and_points_to_sitemap() {
-    let cache_dir = TempDir::new().unwrap();
-    let app = spawn_proxy_server(
-        cache_dir.path().to_path_buf(),
-        "127.0.0.1:9".parse().unwrap(),
-        "/".to_string(),
-    )
-    .await;
 
-    let response = Client::new()
-        .get(format!("http://{app}/robots.txt"))
-        .header("Host", "seo.example.com")
-        .header("X-Forwarded-Proto", "https")
-        .send()
-        .await
-        .unwrap();
-
-    let body = response.text().await.unwrap();
-    assert!(body.contains("Disallow: /api/"));
-    assert!(body.contains("Sitemap: https://seo.example.com/sitemap.xml"));
-}
-
-#[tokio::test]
-async fn sitemap_xml_uses_forwarded_host() {
-    let cache_dir = TempDir::new().unwrap();
-    let app = spawn_proxy_server(
-        cache_dir.path().to_path_buf(),
-        "127.0.0.1:9".parse().unwrap(),
-        "/".to_string(),
-    )
-    .await;
-
-    let response = Client::new()
-        .get(format!("http://{app}/sitemap.xml"))
-        .header("Host", "seo.example.com")
-        .header("X-Forwarded-Proto", "https")
-        .send()
-        .await
-        .unwrap();
-
-    let body = response.text().await.unwrap();
-    assert!(body.contains("<loc>https://seo.example.com/</loc>"));
-}
-
-#[tokio::test]
-async fn sitemap_respects_forwarded_prefix() {
-    let cache_dir = TempDir::new().unwrap();
-    let app = spawn_proxy_server(
-        cache_dir.path().to_path_buf(),
-        "127.0.0.1:9".parse().unwrap(),
-        "/".to_string(),
-    )
-    .await;
-
-    let response = Client::new()
-        .get(format!("http://{app}/sitemap.xml"))
-        .header("Host", "seo.example.com")
-        .header("X-Forwarded-Proto", "https")
-        .header("X-Forwarded-Prefix", "/tools/yundo")
-        .send()
-        .await
-        .unwrap();
-
-    let body = response.text().await.unwrap();
-    assert!(body.contains("<loc>https://seo.example.com/tools/yundo/</loc>"));
-}
-
-#[tokio::test]
-async fn recent_api_includes_history_resource() {
-    let cache_dir = TempDir::new().unwrap();
-    let upstream_hits = Arc::new(AtomicUsize::new(0));
-    let upstream = spawn_upstream_server(upstream_hits).await;
-    let app = spawn_proxy_server(cache_dir.path().to_path_buf(), upstream, "/".to_string()).await;
-    let client = Client::new();
-
-    let proxy_url = format!(
-        "http://{}/api/proxy?url={}",
-        app,
-        urlencoding::encode("http://upstream.test/file")
-    );
-    let download_response = client.get(&proxy_url).send().await.unwrap();
-    assert_eq!(download_response.status(), StatusCode::OK);
-
-    sleep(Duration::from_millis(200)).await;
-
-    let recent_text = client
-        .get(format!("http://{app}/api/recent"))
-        .send()
-        .await
-        .unwrap()
-        .text()
-        .await
-        .unwrap();
-    let recent: serde_json::Value = serde_json::from_str(&recent_text).unwrap();
-    assert_eq!(recent[0]["file_name"].as_str().unwrap(), "file");
-}
 
 #[tokio::test]
 async fn proxy_head_returns_filename_from_signed_url_query() {
@@ -246,17 +150,6 @@ async fn configured_base_path_mounts_routes_under_prefix() {
     );
     let download_response = client.get(&proxy_url).send().await.unwrap();
     assert_eq!(download_response.status(), StatusCode::OK);
-
-    sleep(Duration::from_millis(200)).await;
-
-    let history_response = client
-        .get(format!("http://{app}/tools/yundo/api/recent"))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(history_response.status(), StatusCode::OK);
-
-
 
     let missing_root = client.get(format!("http://{app}/downloads")).send().await.unwrap();
     assert_eq!(missing_root.status(), StatusCode::NOT_FOUND);

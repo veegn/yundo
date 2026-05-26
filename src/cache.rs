@@ -1,6 +1,5 @@
 use crate::{
     common::{ensure_download_filename, AppState, CacheMeta},
-    history::record_download,
 };
 use axum::{
     body::Body,
@@ -134,8 +133,8 @@ pub(crate) async fn enforce_cache_size(state: &AppState) -> std::io::Result<()> 
 pub(crate) async fn try_serve_from_cache(
     data_path: &Path,
     meta_path: &Path,
-    db: sqlx::SqlitePool,
-    target_url: String,
+    _db: sqlx::SqlitePool,
+    _target_url: String,
     file_name: String,
 ) -> Option<axum::response::Response> {
     if !(data_path.exists() && meta_path.exists()) {
@@ -145,12 +144,6 @@ pub(crate) async fn try_serve_from_cache(
     let meta_bytes = fs::read(meta_path).await.ok()?;
     let cache_meta: CacheMeta = serde_json::from_slice(&meta_bytes).ok()?;
     let file = File::open(data_path).await.ok()?;
-    let file_size = file
-        .metadata()
-        .await
-        .ok()
-        .map(|metadata| metadata.len() as i64)
-        .unwrap_or(0);
 
     let mut response_headers = HeaderMap::new();
     for (key, value) in cache_meta.headers {
@@ -159,8 +152,6 @@ pub(crate) async fn try_serve_from_cache(
         response_headers.insert(name, value);
     }
     ensure_download_filename(&mut response_headers, &file_name);
-
-    record_download(db, target_url, file_name, file_size).await;
 
     let status = StatusCode::from_u16(cache_meta.status).unwrap_or(StatusCode::OK);
     let body = Body::from_stream(ReaderStream::new(file));

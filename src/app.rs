@@ -1,8 +1,6 @@
 use crate::{
     common::{health_handler, root_handler, AppState},
-    history::history_handler,
     proxy::{proxy_handler, proxy_head_handler},
-    seo::{prefix_path, robots_txt_handler, sitemap_xml_handler},
 };
 use axum::{
     extract::{OriginalUri, State},
@@ -22,7 +20,6 @@ use tower_http::{
 pub fn build_router(state: Arc<AppState>, frontend_dist: PathBuf) -> Router {
     let mut inner_router = Router::new()
         .route("/api/proxy", get(proxy_handler).head(proxy_head_handler))
-        .route("/api/recent", get(history_handler))
         .route("/api/filebox/files", get(crate::filebox::list_filebox_handler))
         .route(
             "/api/filebox/upload",
@@ -50,8 +47,6 @@ pub fn build_router(state: Arc<AppState>, frontend_dist: PathBuf) -> Router {
         .route("/api/filebox/download/:id", get(crate::filebox::download_filebox_handler))
         .route("/api/filebox/delete/:id", axum::routing::delete(crate::filebox::delete_filebox_handler))
         .route("/healthz", get(health_handler))
-        .route("/robots.txt", get(robots_txt_handler))
-        .route("/sitemap.xml", get(sitemap_xml_handler))
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http());
 
@@ -102,7 +97,7 @@ async fn spa_index_handler(
             .into_response();
     };
 
-    let request_base_path = crate::seo::derive_external_base_path(&headers, &state.base_path);
+    let request_base_path = derive_external_base_path(&headers, &state.base_path);
     let injected = inject_runtime_base_path(&template, &request_base_path);
 
     (
@@ -141,7 +136,7 @@ async fn base_aware_not_found_handler(
     headers: HeaderMap,
     OriginalUri(uri): OriginalUri,
 ) -> impl IntoResponse {
-    let base_path = crate::seo::derive_external_base_path(&headers, &state.base_path);
+    let base_path = derive_external_base_path(&headers, &state.base_path);
     let home_path = prefix_path(&base_path, "/");
     let escaped_path = uri
         .path_and_query()
@@ -237,4 +232,61 @@ fn html_escape(input: &str) -> String {
         .replace('>', "&gt;")
         .replace('"', "&quot;")
         .replace('\'', "&#39;")
+}
+
+pub fn derive_external_base_path(headers: &HeaderMap, configured_base_path: &str) -> String {
+    header_value(headers, "x-forwarded-prefix")
+        .and_then(|value| normalize_base_path(&value))
+        .unwrap_or_else(|| normalize_base_path(configured_base_path).unwrap_or_else(|| "/".to_string()))
+}
+
+pub fn prefix_path(base_path: &str, path: &str) -> String {
+    let normalized_base = normalize_base_path(base_path).unwrap_or_else(|| "/".to_string());
+    let normalized_path = if path.starts_with('/') {
+        path.to_string()
+    } else {
+        format!("/{path}")
+    };
+
+    if normalized_base == "/" {
+        normalized_path
+    } else if normalized_path == "/" {
+        normalized_base
+    } else {
+        format!("{normalized_base}{normalized_path}")
+    }
+}
+
+fn header_value(headers: &HeaderMap, name: &str) -> Option<String> {
+    headers.get(name).and_then(|value| value.to_str().ok()).map(|value| {
+        value
+            .split(',')
+            .next()
+            .unwrap_or(value)
+            .trim()
+            .to_string()
+    })
+}
+
+fn normalize_base_path(input: &str) -> Option<String> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Some("/".to_string());
+    }
+
+    let mut path = if trimmed.starts_with('/') {
+        trimmed.to_string()
+    } else {
+        format!("/{trimmed}")
+    };
+
+    while path.len() > 1 && path.ends_with('/') {
+        path.pop();
+    }
+
+    if path.contains('?') || path.contains('#') {
+        return None;
+    }
+
+    Some(path)
 }

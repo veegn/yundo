@@ -1,6 +1,5 @@
 import { useEffect, useState } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
-import { useSeo } from '../utils/seo';
 import { useI18n } from '../context/I18nContext';
 
 export default function NotFound() {
@@ -8,12 +7,6 @@ export default function NotFound() {
   const location = useLocation();
   const [countdown, setCountdown] = useState(5);
   const { t } = useI18n();
-
-  useSeo({
-    title: t('seo.notfound.title'),
-    description: t('seo.notfound.description'),
-    robots: 'noindex,nofollow',
-  });
 
   useEffect(() => {
     const interval = window.setInterval(() => {

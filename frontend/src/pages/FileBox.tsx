@@ -1,6 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { formatBytes, getIconForFileName } from '../utils/formatters';
-import { useSeo } from '../utils/seo';
 import { withBasePath } from '../utils/basePath';
 import { useI18n } from '../context/I18nContext';
 
@@ -37,12 +36,7 @@ export default function FileBox() {
   const [remoteTransferring, setRemoteTransferring] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  useSeo({
-    title: t('seo.filebox.title'),
-    description: t('seo.filebox.description'),
-    canonicalPath: '/filebox',
-    keywords: t('seo.filebox.keywords'),
-  });
+
 
   const fetchFiles = () => {
     setLoading(true);

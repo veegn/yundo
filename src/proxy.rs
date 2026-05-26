@@ -4,7 +4,6 @@ use crate::{
         build_content_disposition, ensure_download_filename, extract_filename_from_url,
         is_forbidden_host, resolve_file_name, AppState, ProxyQuery, ALLOWED_HEADERS,
     },
-    history::record_download,
 };
 use axum::{
     body::Body,
@@ -139,10 +138,6 @@ pub(crate) async fn proxy_handler(
             "content-disposition".to_string(),
             build_content_disposition(&file_name),
         );
-    }
-
-    if status.is_success() {
-        record_download(state.db.clone(), target_url.clone(), file_name.clone(), file_size).await;
     }
 
     let cache_meta = crate::common::CacheMeta {
