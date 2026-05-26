@@ -32,7 +32,7 @@ pub async fn get_combined_used_size(cache_dir: &Path, db: &sqlx::SqlitePool) -> 
         if let Ok(entries) = std::fs::read_dir(&cache_dir_buf) {
             for entry in entries.flatten() {
                 if let Ok(metadata) = entry.metadata() {
-                    if metadata.is_file() && entry.path().extension().map_or(false, |ext| ext == "data") {
+                    if metadata.is_file() && entry.path().extension().is_some_and(|ext| ext == "data") {
                         proxy_cache_size += metadata.len();
                     }
                 }
@@ -86,7 +86,7 @@ pub(crate) async fn enforce_cache_size(state: &AppState) -> std::io::Result<()> 
         if let Ok(entries) = std::fs::read_dir(&cache_dir_buf) {
             for entry in entries.flatten() {
                 if let Ok(metadata) = entry.metadata() {
-                    if metadata.is_file() && entry.path().extension().map_or(false, |ext| ext == "data") {
+                    if metadata.is_file() && entry.path().extension().is_some_and(|ext| ext == "data") {
                         let size = metadata.len();
                         proxy_cache_size += size;
                         let modified = metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);

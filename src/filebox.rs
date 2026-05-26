@@ -311,11 +311,7 @@ fn parse_range(range_header: &str, file_size: u64) -> Option<(u64, u64)> {
         if suffix_len == 0 {
             return None;
         }
-        let start = if file_size > suffix_len {
-            file_size - suffix_len
-        } else {
-            0
-        };
+        let start = file_size.saturating_sub(suffix_len);
         Some((start, file_size.saturating_sub(1)))
     } else if end_str.is_empty() {
         let start = start_str.parse::<u64>().ok()?;

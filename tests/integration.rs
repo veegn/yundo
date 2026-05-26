@@ -368,7 +368,7 @@ async fn filebox_range_requests_supported() {
     .await;
 
     // 1. Manually insert file into DB and disk to bypass upload logic for testing download range
-    let db = initialize_database(&cache_dir.path().to_path_buf()).await;
+    let db = initialize_database(cache_dir.path()).await;
     let id = "testfile12345678";
     let file_name = "test_data.txt";
     let file_content = b"abcdefghijklmnopqrstuvwxyz"; // 26 bytes
