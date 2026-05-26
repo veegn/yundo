@@ -1,5 +1,4 @@
 use crate::common::HistoryItem;
-use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use sqlx::{Row, SqlitePool};
 
@@ -14,13 +13,6 @@ pub struct RankedHistoryItem {
     pub count_7d: i64,
     pub score: f64,
 }
-
-/// Query parameters for the `/downloads` search endpoint.
-#[derive(Deserialize)]
-pub struct SearchQuery {
-    pub q: Option<String>,
-}
-
 // ---------------------------------------------------------------------------
 // Background task
 // ---------------------------------------------------------------------------

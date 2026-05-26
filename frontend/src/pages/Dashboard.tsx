@@ -1,5 +1,4 @@
 import { useState, useEffect } from 'react';
-import { Link } from 'react-router-dom';
 import { formatBytes, timeAgo, getIconForFileName } from '../utils/formatters';
 import { withBasePath } from '../utils/basePath';
 import { useI18n } from '../context/I18nContext';
