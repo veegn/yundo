@@ -1,8 +1,4 @@
-use axum::{
-    extract::OriginalUri,
-    http::StatusCode,
-    response::IntoResponse,
-};
+use axum::{extract::OriginalUri, http::StatusCode, response::IntoResponse};
 
 pub async fn health_handler() -> &'static str {
     "ok"

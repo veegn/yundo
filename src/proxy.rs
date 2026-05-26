@@ -16,7 +16,11 @@ use bytes::Bytes;
 use futures_util::StreamExt;
 use sha2::{Digest, Sha256};
 use std::{collections::HashMap, sync::Arc};
-use tokio::{fs::{self, File}, io::AsyncWriteExt, sync::mpsc};
+use tokio::{
+    fs::{self, File},
+    io::AsyncWriteExt,
+    sync::mpsc,
+};
 use tokio_stream::wrappers::ReceiverStream;
 use url::Url;
 
@@ -28,7 +32,9 @@ pub(crate) async fn proxy_handler(
     let target_url = query.url;
     let parsed_url = match Url::parse(&target_url) {
         Ok(url) => url,
-        Err(_) => return (axum::http::StatusCode::BAD_REQUEST, "invalid URL format").into_response(),
+        Err(_) => {
+            return (axum::http::StatusCode::BAD_REQUEST, "invalid URL format").into_response()
+        }
     };
 
     if !matches!(parsed_url.scheme(), "http" | "https") {
@@ -39,7 +45,10 @@ pub(crate) async fn proxy_handler(
             .into_response();
     }
 
-    let host = parsed_url.host_str().unwrap_or_default().to_ascii_lowercase();
+    let host = parsed_url
+        .host_str()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
     if is_forbidden_host(&host) {
         return (
             axum::http::StatusCode::FORBIDDEN,
@@ -142,7 +151,13 @@ pub(crate) async fn proxy_handler(
     }
 
     if status.is_success() {
-        record_download(state.db.clone(), target_url.clone(), file_name.clone(), file_size).await;
+        record_download(
+            state.db.clone(),
+            target_url.clone(),
+            file_name.clone(),
+            file_size,
+        )
+        .await;
     }
 
     let cache_meta = crate::common::CacheMeta {
@@ -181,9 +196,7 @@ pub(crate) async fn proxy_handler(
                     }
                 }
                 Err(err) => {
-                    let _ = tx
-                        .send(Err(std::io::Error::other(err.to_string())))
-                        .await;
+                    let _ = tx.send(Err(std::io::Error::other(err.to_string()))).await;
                     success = false;
                     break;
                 }
@@ -209,7 +222,12 @@ pub(crate) async fn proxy_handler(
         let _ = fs::remove_file(&tmp_meta_path).await;
     });
 
-    (status, response_headers, Body::from_stream(ReceiverStream::new(rx))).into_response()
+    (
+        status,
+        response_headers,
+        Body::from_stream(ReceiverStream::new(rx)),
+    )
+        .into_response()
 }
 
 pub(crate) async fn proxy_head_handler(
@@ -220,7 +238,9 @@ pub(crate) async fn proxy_head_handler(
     let target_url = query.url;
     let parsed_url = match Url::parse(&target_url) {
         Ok(url) => url,
-        Err(_) => return (axum::http::StatusCode::BAD_REQUEST, "invalid URL format").into_response(),
+        Err(_) => {
+            return (axum::http::StatusCode::BAD_REQUEST, "invalid URL format").into_response()
+        }
     };
 
     if !matches!(parsed_url.scheme(), "http" | "https") {
@@ -231,7 +251,10 @@ pub(crate) async fn proxy_head_handler(
             .into_response();
     }
 
-    let host = parsed_url.host_str().unwrap_or_default().to_ascii_lowercase();
+    let host = parsed_url
+        .host_str()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
     if is_forbidden_host(&host) {
         return (
             axum::http::StatusCode::FORBIDDEN,

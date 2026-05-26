@@ -1,55 +1,153 @@
 use crate::{
     common::{health_handler, root_handler, AppState},
+    config::NodeMode,
     history::{history_handler, resource_detail_handler, resources_index_handler},
     proxy::{proxy_handler, proxy_head_handler},
     seo::{prefix_path, robots_txt_handler, sitemap_xml_handler},
+    storage::{auth::InternalToken, node, registration, admin},
 };
 use axum::{
     extract::{OriginalUri, State},
     http::{header, HeaderMap, StatusCode},
+    middleware,
     response::{Html, IntoResponse, Redirect},
     routing::get,
     Router,
 };
 use std::{path::PathBuf, sync::Arc};
 use tokio::fs;
-use tower_http::{
-    cors::CorsLayer,
-    services::ServeDir,
-    trace::TraceLayer,
-};
+use tower_http::{cors::CorsLayer, services::ServeDir, trace::TraceLayer};
 
 pub fn build_router(state: Arc<AppState>, frontend_dist: PathBuf) -> Router {
-    let mut inner_router = Router::new()
-        .route("/api/proxy", get(proxy_handler).head(proxy_head_handler))
-        .route("/api/recent", get(history_handler))
-        .route("/api/history", get(history_handler))
-        .route("/api/filebox/files", get(crate::filebox::list_filebox_handler))
-        .route(
-            "/api/filebox/upload",
-            axum::routing::post(crate::filebox::upload_filebox_handler)
-                .layer(axum::extract::DefaultBodyLimit::disable()),
-        )
-        .route(
-            "/api/filebox/upload-chunk",
-            axum::routing::post(crate::filebox::upload_chunk_handler)
-                .layer(axum::extract::DefaultBodyLimit::disable()),
-        )
-        .route(
-            "/api/filebox/upload-complete",
-            axum::routing::post(crate::filebox::upload_complete_handler)
-                .layer(axum::extract::DefaultBodyLimit::disable()),
-        )
-        .route(
-            "/api/filebox/upload-abort",
-            axum::routing::post(crate::filebox::upload_abort_handler),
-        )
-        .route(
-            "/api/filebox/remote-upload",
-            axum::routing::post(crate::filebox::remote_upload_filebox_handler),
-        )
-        .route("/api/filebox/download/:id", get(crate::filebox::download_filebox_handler))
-        .route("/api/filebox/delete/:id", axum::routing::delete(crate::filebox::delete_filebox_handler))
+    let mut inner_router = Router::new();
+
+    // --- Control plane routes (api | all mode) ---
+    if matches!(state.node_mode, NodeMode::Api | NodeMode::All) {
+        inner_router = inner_router
+            .route("/api/proxy", get(proxy_handler).head(proxy_head_handler))
+            .route("/api/recent", get(history_handler))
+            .route("/api/history", get(history_handler))
+            .route(
+                "/api/filebox/files",
+                get(crate::filebox::list_filebox_handler),
+            )
+            .route(
+                "/api/filebox/upload",
+                axum::routing::post(crate::filebox::upload_filebox_handler)
+                    .layer(axum::extract::DefaultBodyLimit::disable()),
+            )
+            .route(
+                "/api/filebox/upload-chunk",
+                axum::routing::post(crate::filebox::upload_chunk_handler)
+                    .layer(axum::extract::DefaultBodyLimit::disable()),
+            )
+            .route(
+                "/api/filebox/upload-complete",
+                axum::routing::post(crate::filebox::upload_complete_handler)
+                    .layer(axum::extract::DefaultBodyLimit::disable()),
+            )
+            .route(
+                "/api/filebox/upload-abort",
+                axum::routing::post(crate::filebox::upload_abort_handler),
+            )
+            .route(
+                "/api/uploads/init",
+                axum::routing::post(crate::uploads::init_upload_handler),
+            )
+            .route(
+                "/api/uploads/:upload_id/status",
+                get(crate::uploads::get_upload_status_handler),
+            )
+            .route(
+                "/api/uploads/:upload_id/chunks/:index",
+                axum::routing::put(crate::uploads::put_upload_chunk_handler)
+                    .layer(axum::extract::DefaultBodyLimit::disable()),
+            )
+            .route(
+                "/api/uploads/:upload_id/complete",
+                axum::routing::post(crate::uploads::complete_upload_handler),
+            )
+            .route(
+                "/api/uploads/:upload_id/abort",
+                axum::routing::post(crate::uploads::abort_upload_handler),
+            )
+            .route(
+                "/api/filebox/remote-upload",
+                axum::routing::post(crate::filebox::remote_upload_filebox_handler),
+            )
+            .route(
+                "/api/filebox/download/:id",
+                get(crate::filebox::download_filebox_handler),
+            )
+            .route(
+                "/api/filebox/delete/:id",
+                axum::routing::delete(crate::filebox::delete_filebox_handler),
+            )
+            // --- Node registration & discovery (api | all) ---
+            .route(
+                "/api/storage/nodes/register",
+                axum::routing::post(registration::register_node_handler),
+            )
+            .route(
+                "/api/storage/nodes/:id/heartbeat",
+                axum::routing::post(registration::heartbeat_handler),
+            )
+            .route(
+                "/api/storage/nodes",
+                get(registration::list_nodes_handler),
+            )
+            // --- Admin management API (api | all) ---
+            .route("/api/admin/nodes", get(admin::list_nodes_handler))
+            .route(
+                "/api/admin/nodes/:id/status",
+                axum::routing::post(admin::set_node_status_handler),
+            )
+            .route(
+                "/api/admin/repair-tasks",
+                get(admin::list_repair_tasks_handler),
+            )
+            .route(
+                "/api/admin/gc-tasks",
+                get(admin::list_gc_tasks_handler),
+            )
+            .route(
+                "/api/admin/repair-tasks/:id/retry",
+                axum::routing::post(admin::retry_repair_task_handler),
+            )
+            .route(
+                "/api/admin/reconcile",
+                axum::routing::post(admin::trigger_reconcile_handler),
+            );
+    }
+
+    // --- Storage Node internal routes (storage | all mode) ---
+    if matches!(state.node_mode, NodeMode::Storage | NodeMode::All) {
+        let mut internal_routes = Router::new()
+            .route(
+                "/internal/chunks",
+                axum::routing::put(node::put_chunk_handler)
+                    .get(node::get_chunk_handler)
+                    .delete(node::delete_chunk_handler)
+                    .layer(axum::extract::DefaultBodyLimit::disable()),
+            )
+            .route(
+                "/internal/chunks/verify",
+                axum::routing::post(node::verify_chunk_handler),
+            )
+            .route("/internal/healthz", get(node::healthz_handler));
+
+        // Add auth middleware if internal token is configured
+        if let Some(ref token) = state.internal_token {
+            internal_routes = internal_routes.layer(axum::Extension(InternalToken(token.clone())));
+            internal_routes = internal_routes
+                .layer(middleware::from_fn(crate::storage::auth::internal_auth_middleware));
+        }
+
+        inner_router = inner_router.merge(internal_routes);
+    }
+
+    // --- Common routes (all modes) ---
+    inner_router = inner_router
         .route("/healthz", get(health_handler))
         .route("/robots.txt", get(robots_txt_handler))
         .route("/sitemap.xml", get(sitemap_xml_handler))
@@ -86,7 +184,10 @@ pub fn build_router(state: Arc<AppState>, frontend_dist: PathBuf) -> Router {
     } else {
         let redirect_target = state.base_path.clone();
         Router::new()
-            .route("/", get(move || async move { Redirect::permanent(&redirect_target) }))
+            .route(
+                "/",
+                get(move || async move { Redirect::permanent(&redirect_target) }),
+            )
             .nest(&state.base_path, inner_router)
     };
 

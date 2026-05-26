@@ -175,12 +175,10 @@ async fn proxy_head_returns_filename_from_signed_url_query() {
     let app = spawn_proxy_server(cache_dir.path().to_path_buf(), upstream, "/".to_string()).await;
 
     let mut signed_url = Url::parse("http://upstream.test/file").unwrap();
-    signed_url
-        .query_pairs_mut()
-        .append_pair(
-            "response-content-disposition",
-            "attachment; filename=Clash.Verge_2.4.7_x64-setup.exe",
-        );
+    signed_url.query_pairs_mut().append_pair(
+        "response-content-disposition",
+        "attachment; filename=Clash.Verge_2.4.7_x64-setup.exe",
+    );
 
     let response = Client::new()
         .head(format!(
@@ -275,7 +273,12 @@ async fn configured_base_path_mounts_routes_under_prefix() {
     let cache_dir = TempDir::new().unwrap();
     let upstream_hits = Arc::new(AtomicUsize::new(0));
     let upstream = spawn_upstream_server(upstream_hits).await;
-    let app = spawn_proxy_server(cache_dir.path().to_path_buf(), upstream, "/tools/yundo".to_string()).await;
+    let app = spawn_proxy_server(
+        cache_dir.path().to_path_buf(),
+        upstream,
+        "/tools/yundo".to_string(),
+    )
+    .await;
     let client = Client::new();
 
     let proxy_url = format!(
@@ -302,13 +305,24 @@ async fn configured_base_path_mounts_routes_under_prefix() {
         .unwrap();
     assert_eq!(resources_response.status(), StatusCode::OK);
 
-    let missing_root = client.get(format!("http://{app}/downloads")).send().await.unwrap();
+    let missing_root = client
+        .get(format!("http://{app}/downloads"))
+        .send()
+        .await
+        .unwrap();
     assert_eq!(missing_root.status(), StatusCode::NOT_FOUND);
 }
 
-async fn spawn_proxy_server(cache_dir: PathBuf, upstream_addr: SocketAddr, base_path: String) -> SocketAddr {
+async fn spawn_proxy_server(
+    cache_dir: PathBuf,
+    upstream_addr: SocketAddr,
+    base_path: String,
+) -> SocketAddr {
     initialize_cache_dir(&cache_dir).await;
     let db = initialize_database(&cache_dir).await;
+    let storage_backend = std::sync::Arc::new(precision_proxy::storage::LocalStorageBackend::new(
+        cache_dir.join("storage"),
+    ));
     let state = Arc::new(AppState {
         client: Client::builder()
             .redirect(reqwest::redirect::Policy::limited(10))
@@ -321,6 +335,19 @@ async fn spawn_proxy_server(cache_dir: PathBuf, upstream_addr: SocketAddr, base_
         db,
         frontend_dist: PathBuf::from("./frontend/missing-dist"),
         base_path,
+        storage_backend,
+        node_mode: precision_proxy::config::NodeMode::All,
+        node_config: precision_proxy::common::NodeConfig {
+            node_id: "local".to_string(),
+            endpoint: None,
+            zone: None,
+            api_endpoint: None,
+            heartbeat_interval_secs: 30,
+            heartbeat_ttl_secs: 90,
+            default_chunk_size: 16 * 1024 * 1024,
+            default_replication_factor: 1,
+        },
+        internal_token: None,
     });
 
     let router = build_router(state, PathBuf::from("./frontend/missing-dist"));
@@ -344,12 +371,20 @@ async fn spawn_upstream_server(hit_count: Arc<AtomicUsize>) -> SocketAddr {
             if range == "bytes=1-3" {
                 response_headers.insert("content-range", HeaderValue::from_static("bytes 1-3/6"));
                 response_headers.insert("content-length", HeaderValue::from_static("3"));
-                return (StatusCode::PARTIAL_CONTENT, response_headers, Body::from("bcd"));
+                return (
+                    StatusCode::PARTIAL_CONTENT,
+                    response_headers,
+                    Body::from("bcd"),
+                );
             }
         }
 
         response_headers.insert("content-length", HeaderValue::from_static("6"));
-        (StatusCode::OK, response_headers, Body::from(body.as_slice()))
+        (
+            StatusCode::OK,
+            response_headers,
+            Body::from(body.as_slice()),
+        )
     }
 
     async fn head_file() -> impl IntoResponse {

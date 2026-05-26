@@ -8,5 +8,6 @@ pub use crate::headers::{
     is_forbidden_host, resolve_file_name, ALLOWED_HEADERS,
 };
 pub use crate::state::{
-    initialize_cache_dir, initialize_database, AppState, CacheMeta, HistoryItem, ProxyQuery,
+    initialize_cache_dir, initialize_database, AppState, CacheMeta, HistoryItem, NodeConfig,
+    ProxyQuery,
 };

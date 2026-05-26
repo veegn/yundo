@@ -97,35 +97,39 @@ export default function FileBox() {
     setUploadProgress(0);
     setUploadSpeed(null);
 
-    const CHUNK_SIZE = 72 * 1024 * 1024; // 72MB chunks to bypass Cloudflare 100MB limit
-    
-    // Calculate total bytes across all files to upload
+    const computeSha256 = async (chunk: Blob) => {
+      if (!crypto.subtle) {
+        throw new Error('当前环境不支持 Web Crypto API，请使用 HTTPS 或 localhost 上传文件。');
+      }
+      const buffer = await chunk.arrayBuffer();
+      const hashBuffer = await crypto.subtle.digest('SHA-256', buffer);
+      const hashArray = Array.from(new Uint8Array(hashBuffer));
+      return hashArray.map((byte) => byte.toString(16).padStart(2, '0')).join('');
+    };
+
     let totalBytesAllFiles = 0;
     for (let i = 0; i < files.length; i++) {
       totalBytesAllFiles += files[i].size;
     }
-    
+
     let completedBytesAllFiles = 0;
     const activeChunkUploadedBytes: { [key: string]: number } = {};
     const activeXhrs: { [key: string]: XMLHttpRequest } = {};
     const speedSamples: { timestamp: number; bytes: number }[] = [];
     const startTime = Date.now();
 
-    // Helper to calculate total real-time uploaded bytes and update UI smoothly
     const updateProgressAndSpeed = () => {
       let totalRealTimeBytes = completedBytesAllFiles;
       for (const bytes of Object.values(activeChunkUploadedBytes)) {
         totalRealTimeBytes += bytes;
       }
 
-      // Update progress bar percentage (cap at 99% until complete merge)
       const percent = Math.round((totalRealTimeBytes / totalBytesAllFiles) * 100);
       setUploadProgress(Math.min(percent, 99));
 
       const now = Date.now();
       speedSamples.push({ timestamp: now, bytes: totalRealTimeBytes });
 
-      // Prune samples older than 2 seconds to get an accurate sliding-window speed
       const cutoff = now - 2000;
       while (speedSamples.length > 0 && speedSamples[0].timestamp < cutoff) {
         speedSamples.shift();
@@ -154,11 +158,14 @@ export default function FileBox() {
       chunk: Blob,
       chunkIndex: number,
       uploadId: string,
+      sha256: string,
       chunkKey: string
     ): Promise<void> => {
       return new Promise((resolve, reject) => {
         const xhr = new XMLHttpRequest();
-        xhr.open('POST', withBasePath('/api/filebox/upload-chunk'));
+        xhr.open('PUT', withBasePath(`/api/uploads/${uploadId}/chunks/${chunkIndex}`));
+        xhr.setRequestHeader('X-Chunk-Sha256', sha256);
+        xhr.setRequestHeader('Content-Type', 'application/octet-stream');
 
         activeXhrs[chunkKey] = xhr;
 
@@ -172,7 +179,7 @@ export default function FileBox() {
         xhr.onload = () => {
           delete activeXhrs[chunkKey];
           if (xhr.status >= 200 && xhr.status < 300) {
-            activeChunkUploadedBytes[chunkKey] = chunk.size; // Ensure full chunk registered
+            activeChunkUploadedBytes[chunkKey] = chunk.size;
             updateProgressAndSpeed();
             resolve();
           } else {
@@ -195,92 +202,89 @@ export default function FileBox() {
           reject(new Error('Upload aborted'));
         };
 
-        const formData = new FormData();
-        formData.append('upload_id', uploadId);
-        formData.append('chunk_index', chunkIndex.toString());
-        formData.append('file', chunk);
-
-        xhr.send(formData);
+        xhr.send(chunk);
       });
     };
 
     for (let i = 0; i < files.length; i++) {
       const file = files[i];
-      const totalChunks = Math.ceil(file.size / CHUNK_SIZE) || 1;
-      const uploadId = Math.random().toString(36).substring(2, 15) + Date.now().toString(36);
-
-      // Upload chunks concurrently (concurrency limit = 3) to optimize speed and bypass network delay
-      const MAX_CONCURRENT = 3;
-      const chunkIndices = Array.from({ length: totalChunks }, (_, idx) => idx);
-      let uploadError: Error | null = null;
-
-      const uploadWorker = async () => {
-        while (chunkIndices.length > 0 && !uploadError) {
-          const chunkIndex = chunkIndices.shift();
-          if (chunkIndex === undefined) break;
-
-          const start = chunkIndex * CHUNK_SIZE;
-          const end = Math.min(start + CHUNK_SIZE, file.size);
-          const chunk = file.slice(start, end);
-          const chunkKey = `${uploadId}-${chunkIndex}`;
-
-          try {
-            await uploadChunkWithXhr(chunk, chunkIndex, uploadId, chunkKey);
-            completedBytesAllFiles += chunk.size;
-            delete activeChunkUploadedBytes[chunkKey]; // Move from active map to completed baseline
-            updateProgressAndSpeed();
-          } catch (err: any) {
-            uploadError = err;
-            // Abort all in-flight XHRs immediately
-            for (const activeXhr of Object.values(activeXhrs)) {
-              activeXhr.abort();
-            }
-            throw err;
-          }
-        }
-      };
+      let uploadId = '';
 
       try {
-        const workers = [];
-        const numWorkers = Math.min(MAX_CONCURRENT, totalChunks);
-        for (let w = 0; w < numWorkers; w++) {
-          workers.push(uploadWorker());
-        }
-        await Promise.all(workers);
-      } catch (err: any) {
-        // Proactively signal backend to delete partial chunks
-        fetch(withBasePath('/api/filebox/upload-abort'), {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json'
-          },
-          body: JSON.stringify({ upload_id: uploadId })
-        }).catch((e) => console.error('Failed to send upload-abort signal:', e));
-
-        setUploading(false);
-        setErrorMessage(err.message || t('filebox.err.network'));
-        return; // Stop processing further files
-      }
-
-      // Signal upload completion for this file to merge chunks
-      try {
-        const resComplete = await fetch(withBasePath('/api/filebox/upload-complete'), {
+        const resInit = await fetch(withBasePath('/api/uploads/init'), {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json'
           },
           body: JSON.stringify({
-            upload_id: uploadId,
             file_name: file.name,
-            total_chunks: totalChunks
+            file_size: file.size,
+            content_type: file.type || null,
+            replication_factor: 1
           })
         });
 
+        if (!resInit.ok) {
+          const errText = await resInit.text();
+          throw new Error(errText || t('filebox.err.upload_failed'));
+        }
+
+        const uploadSession = await resInit.json();
+        uploadId = uploadSession.upload_id;
+        const chunkSize = uploadSession.chunk_size;
+        const totalChunks = uploadSession.total_chunks;
+        const maxConcurrent = Math.max(1, Math.min(uploadSession.concurrency_hint || 2, 6));
+        const chunkIndices = Array.from({ length: totalChunks }, (_, idx) => idx);
+        let uploadError: Error | null = null;
+
+        const uploadWorker = async () => {
+          while (chunkIndices.length > 0 && !uploadError) {
+            const chunkIndex = chunkIndices.shift();
+            if (chunkIndex === undefined) break;
+
+            const start = chunkIndex * chunkSize;
+            const end = Math.min(start + chunkSize, file.size);
+            const chunk = file.slice(start, end);
+            const chunkKey = `${uploadId}-${chunkIndex}`;
+
+            try {
+              const sha256 = await computeSha256(chunk);
+              await uploadChunkWithXhr(chunk, chunkIndex, uploadId, sha256, chunkKey);
+              completedBytesAllFiles += chunk.size;
+              delete activeChunkUploadedBytes[chunkKey];
+              updateProgressAndSpeed();
+            } catch (err: any) {
+              uploadError = err;
+              for (const activeXhr of Object.values(activeXhrs)) {
+                activeXhr.abort();
+              }
+              throw err;
+            }
+          }
+        };
+
+        const workers = [];
+        const numWorkers = Math.min(maxConcurrent, totalChunks);
+        for (let w = 0; w < numWorkers; w++) {
+          workers.push(uploadWorker());
+        }
+        await Promise.all(workers);
+
+        const resComplete = await fetch(withBasePath(`/api/uploads/${uploadId}/complete`), {
+          method: 'POST'
+        });
+
         if (!resComplete.ok) {
-           let errText = await resComplete.text();
-           throw new Error(errText || t('filebox.err.upload_failed'));
+          const errText = await resComplete.text();
+          throw new Error(errText || t('filebox.err.upload_failed'));
         }
       } catch (err: any) {
+        if (uploadId) {
+          fetch(withBasePath(`/api/uploads/${uploadId}/abort`), {
+            method: 'POST'
+          }).catch((e) => console.error('Failed to send upload-abort signal:', e));
+        }
+
         setUploading(false);
         setErrorMessage(err.message || t('filebox.err.network'));
         return;

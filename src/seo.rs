@@ -87,7 +87,9 @@ pub fn derive_base_url(headers: &HeaderMap, configured_base_path: &str) -> Strin
 pub fn derive_external_base_path(headers: &HeaderMap, configured_base_path: &str) -> String {
     header_value(headers, "x-forwarded-prefix")
         .and_then(|value| normalize_base_path(&value))
-        .unwrap_or_else(|| normalize_base_path(configured_base_path).unwrap_or_else(|| "/".to_string()))
+        .unwrap_or_else(|| {
+            normalize_base_path(configured_base_path).unwrap_or_else(|| "/".to_string())
+        })
 }
 
 pub fn prefix_path(base_path: &str, path: &str) -> String {
@@ -108,14 +110,10 @@ pub fn prefix_path(base_path: &str, path: &str) -> String {
 }
 
 fn header_value(headers: &HeaderMap, name: &str) -> Option<String> {
-    headers.get(name).and_then(|value| value.to_str().ok()).map(|value| {
-        value
-            .split(',')
-            .next()
-            .unwrap_or(value)
-            .trim()
-            .to_string()
-    })
+    headers
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.split(',').next().unwrap_or(value).trim().to_string())
 }
 
 fn normalize_base_path(input: &str) -> Option<String> {

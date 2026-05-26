@@ -2,6 +2,35 @@ use clap::Parser;
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NodeMode {
+    Api,
+    Storage,
+    All,
+}
+
+impl std::str::FromStr for NodeMode {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_ascii_lowercase().as_str() {
+            "api" => Ok(NodeMode::Api),
+            "storage" => Ok(NodeMode::Storage),
+            "all" => Ok(NodeMode::All),
+            _ => Err(format!("invalid node mode `{s}`; expected api, storage, or all")),
+        }
+    }
+}
+
+impl std::fmt::Display for NodeMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            NodeMode::Api => write!(f, "api"),
+            NodeMode::Storage => write!(f, "storage"),
+            NodeMode::All => write!(f, "all"),
+        }
+    }
+}
+
 #[derive(Parser, Debug)]
 #[command(author, version, about)]
 pub struct Args {
@@ -25,6 +54,46 @@ pub struct Args {
 
     #[arg(long, default_value = "/", value_parser = normalize_base_path)]
     pub base_path: String,
+
+    /// Node operating mode: api, storage, or all (default: all)
+    #[arg(long, default_value = "all")]
+    pub node_mode: NodeMode,
+
+    /// Unique node identifier (required for storage/all modes)
+    #[arg(long, default_value = "local")]
+    pub node_id: String,
+
+    /// Public endpoint of this storage node (for storage mode registration)
+    #[arg(long)]
+    pub node_endpoint: Option<String>,
+
+    /// Availability zone for cross-zone replica placement
+    #[arg(long)]
+    pub node_zone: Option<String>,
+
+    /// API control plane endpoint (required for storage mode)
+    #[arg(long)]
+    pub api_endpoint: Option<String>,
+
+    /// Shared internal authentication token for node-to-node communication
+    #[arg(long)]
+    pub internal_token: Option<String>,
+
+    /// Heartbeat interval in seconds
+    #[arg(long, default_value_t = 30)]
+    pub node_heartbeat_interval: u64,
+
+    /// Heartbeat TTL in seconds (node considered offline after this)
+    #[arg(long, default_value_t = 90)]
+    pub node_heartbeat_ttl: u64,
+
+    /// Default chunk size for uploads
+    #[arg(long, default_value = "16MiB", value_parser = parse_cache_size)]
+    pub default_chunk_size: u64,
+
+    /// Default replication factor for new files
+    #[arg(long, default_value_t = 2)]
+    pub default_replication_factor: i64,
 }
 
 pub fn parse_cache_size(input: &str) -> Result<u64, String> {
