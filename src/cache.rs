@@ -8,9 +8,7 @@ use axum::{
     response::IntoResponse,
 };
 use std::{path::Path, sync::Arc, time::SystemTime};
-use tokio::{
-    fs::{self, File},
-};
+use tokio::fs::{self, File};
 use tokio_util::io::ReaderStream;
 
 use sqlx::Row;
@@ -27,12 +25,14 @@ pub async fn get_combined_used_size(cache_dir: &Path, db: &sqlx::SqlitePool) -> 
     let cache_dir_buf = cache_dir.to_path_buf();
     let disk_size = tokio::task::spawn_blocking(move || {
         let mut proxy_cache_size = 0_u64;
-        
+
         // Calculate proxy cache data files size
         if let Ok(entries) = std::fs::read_dir(&cache_dir_buf) {
             for entry in entries.flatten() {
                 if let Ok(metadata) = entry.metadata() {
-                    if metadata.is_file() && entry.path().extension().is_some_and(|ext| ext == "data") {
+                    if metadata.is_file()
+                        && entry.path().extension().is_some_and(|ext| ext == "data")
+                    {
                         proxy_cache_size += metadata.len();
                     }
                 }
@@ -78,7 +78,7 @@ pub fn spawn_cache_eviction_task(state: Arc<AppState>) {
 
 pub(crate) async fn enforce_cache_size(state: &AppState) -> std::io::Result<()> {
     let cache_dir_buf = state.cache_dir.to_path_buf();
-    
+
     // 1. Calculate proxy cache files size and gather their modified dates synchronously inside spawn_blocking
     let (mut files, proxy_cache_size) = tokio::task::spawn_blocking(move || {
         let mut files = Vec::new();
@@ -86,7 +86,9 @@ pub(crate) async fn enforce_cache_size(state: &AppState) -> std::io::Result<()> 
         if let Ok(entries) = std::fs::read_dir(&cache_dir_buf) {
             for entry in entries.flatten() {
                 if let Ok(metadata) = entry.metadata() {
-                    if metadata.is_file() && entry.path().extension().is_some_and(|ext| ext == "data") {
+                    if metadata.is_file()
+                        && entry.path().extension().is_some_and(|ext| ext == "data")
+                    {
                         let size = metadata.len();
                         proxy_cache_size += size;
                         let modified = metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
@@ -112,6 +114,13 @@ pub(crate) async fn enforce_cache_size(state: &AppState) -> std::io::Result<()> 
     if total_size <= state.max_cache_size {
         return Ok(());
     }
+    tracing::info!(
+        proxy_cache_size,
+        filebox_size,
+        total_size,
+        max_cache_size = state.max_cache_size,
+        "cache eviction started"
+    );
 
     // 3. Sort files by modified time and evict oldest proxy cache files
     files.sort_by_key(|(_, _, modified)| *modified);
@@ -124,9 +133,20 @@ pub(crate) async fn enforce_cache_size(state: &AppState) -> std::io::Result<()> 
         let meta_path = path.with_extension("meta");
         if fs::remove_file(path).await.is_ok() {
             total_size = total_size.saturating_sub(*size);
+            tracing::info!(
+                path = %path.display(),
+                size,
+                total_size,
+                "evicted proxy cache file"
+            );
         }
         let _ = fs::remove_file(&meta_path).await;
     }
+    tracing::info!(
+        total_size,
+        max_cache_size = state.max_cache_size,
+        "cache eviction finished"
+    );
 
     Ok(())
 }
@@ -139,12 +159,46 @@ pub(crate) async fn try_serve_from_cache(
     file_name: String,
 ) -> Option<axum::response::Response> {
     if !(data_path.exists() && meta_path.exists()) {
+        tracing::info!(target_url = %target_url, "proxy cache miss");
         return None;
     }
 
-    let meta_bytes = fs::read(meta_path).await.ok()?;
-    let cache_meta: CacheMeta = serde_json::from_slice(&meta_bytes).ok()?;
-    let file = File::open(data_path).await.ok()?;
+    let meta_bytes = match fs::read(meta_path).await {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            tracing::warn!(
+                target_url = %target_url,
+                meta_path = %meta_path.display(),
+                error = %err,
+                "failed to read proxy cache metadata"
+            );
+            return None;
+        }
+    };
+    let cache_meta: CacheMeta = match serde_json::from_slice(&meta_bytes) {
+        Ok(meta) => meta,
+        Err(err) => {
+            tracing::warn!(
+                target_url = %target_url,
+                meta_path = %meta_path.display(),
+                error = %err,
+                "failed to parse proxy cache metadata"
+            );
+            return None;
+        }
+    };
+    let file = match File::open(data_path).await {
+        Ok(file) => file,
+        Err(err) => {
+            tracing::warn!(
+                target_url = %target_url,
+                data_path = %data_path.display(),
+                error = %err,
+                "failed to open proxy cache data"
+            );
+            return None;
+        }
+    };
     let file_size = file
         .metadata()
         .await
@@ -160,9 +214,15 @@ pub(crate) async fn try_serve_from_cache(
     }
     ensure_download_filename(&mut response_headers, &file_name);
 
+    let status = StatusCode::from_u16(cache_meta.status).unwrap_or(StatusCode::OK);
+    tracing::info!(
+        file_name = %file_name,
+        file_size,
+        status = %status,
+        "proxy cache hit"
+    );
     record_download(db, target_url, file_name, file_size).await;
 
-    let status = StatusCode::from_u16(cache_meta.status).unwrap_or(StatusCode::OK);
     let body = Body::from_stream(ReaderStream::new(file));
     Some((status, response_headers, body).into_response())
 }

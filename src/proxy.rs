@@ -16,7 +16,11 @@ use bytes::Bytes;
 use futures_util::StreamExt;
 use sha2::{Digest, Sha256};
 use std::{collections::HashMap, sync::Arc};
-use tokio::{fs::{self, File}, io::AsyncWriteExt, sync::mpsc};
+use tokio::{
+    fs::{self, File},
+    io::AsyncWriteExt,
+    sync::mpsc,
+};
 use tokio_stream::wrappers::ReceiverStream;
 use url::Url;
 
@@ -26,12 +30,22 @@ pub(crate) async fn proxy_handler(
     req_headers: HeaderMap,
 ) -> impl IntoResponse {
     let target_url = query.url;
+    tracing::info!(target_url = %target_url, "proxy request received");
+
     let parsed_url = match Url::parse(&target_url) {
         Ok(url) => url,
-        Err(_) => return (axum::http::StatusCode::BAD_REQUEST, "invalid URL format").into_response(),
+        Err(err) => {
+            tracing::warn!(target_url = %target_url, error = %err, "proxy request rejected: invalid URL");
+            return (axum::http::StatusCode::BAD_REQUEST, "invalid URL format").into_response();
+        }
     };
 
     if !matches!(parsed_url.scheme(), "http" | "https") {
+        tracing::warn!(
+            target_url = %target_url,
+            scheme = %parsed_url.scheme(),
+            "proxy request rejected: unsupported scheme"
+        );
         return (
             axum::http::StatusCode::BAD_REQUEST,
             "only HTTP and HTTPS URLs are supported",
@@ -39,8 +53,12 @@ pub(crate) async fn proxy_handler(
             .into_response();
     }
 
-    let host = parsed_url.host_str().unwrap_or_default().to_ascii_lowercase();
+    let host = parsed_url
+        .host_str()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
     if is_forbidden_host(&host) {
+        tracing::warn!(target_url = %target_url, host = %host, "proxy request rejected: forbidden host");
         return (
             axum::http::StatusCode::FORBIDDEN,
             "access to local or private networks is forbidden",
@@ -56,6 +74,12 @@ pub(crate) async fn proxy_handler(
         .and_then(|value| value.to_str().ok())
         .unwrap_or("");
     let is_range_request = !range_value.is_empty();
+    tracing::info!(
+        target_url = %target_url,
+        range = %range_value,
+        is_range_request,
+        "proxy request accepted"
+    );
 
     let hash = {
         let mut hasher = Sha256::new();
@@ -69,6 +93,7 @@ pub(crate) async fn proxy_handler(
     let meta_path = state.cache_dir.join(format!("{hash}.meta"));
 
     if !is_range_request {
+        tracing::info!(target_url = %target_url, cache_key = %hash, "checking proxy cache");
         if let Some(response) = try_serve_from_cache(
             &data_path,
             &meta_path,
@@ -91,7 +116,7 @@ pub(crate) async fn proxy_handler(
     let upstream_response = match upstream_request.send().await {
         Ok(response) => response,
         Err(err) => {
-            tracing::error!("proxy request failed for {target_url}: {err}");
+            tracing::error!(target_url = %target_url, error = %err, "proxy upstream request failed");
             return (
                 axum::http::StatusCode::BAD_GATEWAY,
                 "failed to reach target server",
@@ -132,6 +157,15 @@ pub(crate) async fn proxy_handler(
     }
 
     let file_name = resolve_file_name(&parsed_url, Some(&final_url), &response_headers);
+    tracing::info!(
+        target_url = %target_url,
+        final_url = %final_url,
+        status = %status,
+        file_name = %file_name,
+        file_size,
+        is_range_request,
+        "proxy upstream response received"
+    );
 
     ensure_download_filename(&mut response_headers, &file_name);
     if !meta_headers.contains_key("content-disposition") {
@@ -147,13 +181,21 @@ pub(crate) async fn proxy_handler(
     };
     let should_cache = status.is_success() && !is_range_request;
     if status.is_success() {
-        record_download(state.db.clone(), target_url.clone(), file_name.clone(), file_size).await;
+        record_download(
+            state.db.clone(),
+            target_url.clone(),
+            file_name.clone(),
+            file_size,
+        )
+        .await;
     }
     let mut stream = upstream_response.bytes_stream();
     let (tx, rx) = mpsc::channel::<Result<Bytes, std::io::Error>>(16);
 
     let tmp_data_path = state.cache_dir.join(format!("{hash}.data.tmp"));
     let tmp_meta_path = state.cache_dir.join(format!("{hash}.meta.tmp"));
+    let cache_key = hash.clone();
+    let stream_target_url = target_url.clone();
 
     tokio::spawn(async move {
         let mut temp_file = if should_cache {
@@ -162,13 +204,20 @@ pub(crate) async fn proxy_handler(
             None
         };
         let mut success = true;
+        let mut bytes_streamed = 0_u64;
 
         while let Some(chunk_result) = stream.next().await {
             match chunk_result {
                 Ok(chunk) => {
+                    bytes_streamed += chunk.len() as u64;
                     if let Some(file) = temp_file.as_mut() {
                         if let Err(err) = file.write_all(&chunk).await {
-                            tracing::error!("failed to write cache chunk: {err}");
+                            tracing::error!(
+                                target_url = %stream_target_url,
+                                cache_key = %cache_key,
+                                error = %err,
+                                "failed to write proxy cache chunk"
+                            );
                             success = false;
                             break;
                         }
@@ -180,9 +229,13 @@ pub(crate) async fn proxy_handler(
                     }
                 }
                 Err(err) => {
-                    let _ = tx
-                        .send(Err(std::io::Error::other(err.to_string())))
-                        .await;
+                    let _ = tx.send(Err(std::io::Error::other(err.to_string()))).await;
+                    tracing::warn!(
+                        target_url = %stream_target_url,
+                        cache_key = %cache_key,
+                        error = %err,
+                        "proxy upstream stream failed"
+                    );
                     success = false;
                     break;
                 }
@@ -199,16 +252,40 @@ pub(crate) async fn proxy_handler(
                     && fs::rename(&tmp_data_path, &data_path).await.is_ok()
                     && fs::rename(&tmp_meta_path, &meta_path).await.is_ok()
                 {
+                    tracing::info!(
+                        target_url = %stream_target_url,
+                        cache_key = %cache_key,
+                        bytes_streamed,
+                        "proxy response cached"
+                    );
                     return;
                 }
             }
+            tracing::warn!(
+                target_url = %stream_target_url,
+                cache_key = %cache_key,
+                "failed to finalize proxy cache files"
+            );
         }
 
         let _ = fs::remove_file(&tmp_data_path).await;
         let _ = fs::remove_file(&tmp_meta_path).await;
+        tracing::info!(
+            target_url = %stream_target_url,
+            cache_key = %cache_key,
+            bytes_streamed,
+            cached = false,
+            success,
+            "proxy stream finished"
+        );
     });
 
-    (status, response_headers, Body::from_stream(ReceiverStream::new(rx))).into_response()
+    (
+        status,
+        response_headers,
+        Body::from_stream(ReceiverStream::new(rx)),
+    )
+        .into_response()
 }
 
 pub(crate) async fn proxy_head_handler(
@@ -217,12 +294,22 @@ pub(crate) async fn proxy_head_handler(
     req_headers: HeaderMap,
 ) -> impl IntoResponse {
     let target_url = query.url;
+    tracing::info!(target_url = %target_url, "proxy HEAD request received");
+
     let parsed_url = match Url::parse(&target_url) {
         Ok(url) => url,
-        Err(_) => return (axum::http::StatusCode::BAD_REQUEST, "invalid URL format").into_response(),
+        Err(err) => {
+            tracing::warn!(target_url = %target_url, error = %err, "proxy HEAD request rejected: invalid URL");
+            return (axum::http::StatusCode::BAD_REQUEST, "invalid URL format").into_response();
+        }
     };
 
     if !matches!(parsed_url.scheme(), "http" | "https") {
+        tracing::warn!(
+            target_url = %target_url,
+            scheme = %parsed_url.scheme(),
+            "proxy HEAD request rejected: unsupported scheme"
+        );
         return (
             axum::http::StatusCode::BAD_REQUEST,
             "only HTTP and HTTPS URLs are supported",
@@ -230,8 +317,12 @@ pub(crate) async fn proxy_head_handler(
             .into_response();
     }
 
-    let host = parsed_url.host_str().unwrap_or_default().to_ascii_lowercase();
+    let host = parsed_url
+        .host_str()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
     if is_forbidden_host(&host) {
+        tracing::warn!(target_url = %target_url, host = %host, "proxy HEAD request rejected: forbidden host");
         return (
             axum::http::StatusCode::FORBIDDEN,
             "access to local or private networks is forbidden",
@@ -248,7 +339,7 @@ pub(crate) async fn proxy_head_handler(
     let upstream_response = match upstream_request.send().await {
         Ok(response) => response,
         Err(err) => {
-            tracing::error!("proxy HEAD request failed for {target_url}: {err}");
+            tracing::error!(target_url = %target_url, error = %err, "proxy HEAD upstream request failed");
             return (
                 axum::http::StatusCode::BAD_GATEWAY,
                 "failed to reach target server",
@@ -270,6 +361,13 @@ pub(crate) async fn proxy_head_handler(
 
     let file_name = resolve_file_name(&parsed_url, Some(&final_url), &response_headers);
     ensure_download_filename(&mut response_headers, &file_name);
+    tracing::info!(
+        target_url = %target_url,
+        final_url = %final_url,
+        status = %status,
+        file_name = %file_name,
+        "proxy HEAD response received"
+    );
 
     (status, response_headers).into_response()
 }

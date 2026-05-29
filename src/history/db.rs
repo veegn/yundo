@@ -40,13 +40,15 @@ pub fn spawn_history_cleanup_task(db: SqlitePool) {
 
 /// Records a download event and upserts the download_history row.
 /// Spawned as a background task so it never blocks the response stream.
-pub async fn record_download(
-    db: SqlitePool,
-    url: String,
-    file_name: String,
-    file_size: i64,
-) {
+pub async fn record_download(db: SqlitePool, url: String, file_name: String, file_size: i64) {
     tokio::spawn(async move {
+        tracing::info!(
+            url = %url,
+            file_name = %file_name,
+            file_size,
+            "recording download history"
+        );
+
         if let Err(err) = sqlx::query(
             "INSERT INTO download_history (url, file_name, file_size, last_download_at)
              VALUES (?, ?, ?, CURRENT_TIMESTAMP)
@@ -61,7 +63,12 @@ pub async fn record_download(
         .execute(&db)
         .await
         {
-            tracing::warn!("failed to update download history: {err}");
+            tracing::warn!(
+                url = %url,
+                file_name = %file_name,
+                error = %err,
+                "failed to update download history"
+            );
             return;
         }
 
@@ -70,8 +77,21 @@ pub async fn record_download(
             .execute(&db)
             .await
         {
-            tracing::warn!("failed to insert download event: {err}");
+            tracing::warn!(
+                url = %url,
+                file_name = %file_name,
+                error = %err,
+                "failed to insert download event"
+            );
+            return;
         }
+
+        tracing::info!(
+            url = %url,
+            file_name = %file_name,
+            file_size,
+            "download history recorded"
+        );
     });
 }
 
@@ -85,6 +105,7 @@ pub async fn load_ranked_history_items(
     db: &SqlitePool,
     query_str: Option<&str>,
 ) -> Vec<RankedHistoryItem> {
+    tracing::info!(query = ?query_str, "loading ranked download history");
     let query_pattern = query_str
         .map(|q| format!("%{q}%"))
         .unwrap_or_else(|| "%".to_string());
@@ -117,8 +138,7 @@ pub async fn load_ranked_history_items(
             let file_name: String = row.get("file_name");
             let count_7d: i64 = row.get("count_7d");
             let hours_since_last: f64 = row.get("hours_since_last");
-            let score =
-                ((count_7d as f64 + 1.0).powf(0.8)) / ((hours_since_last + 2.0).powf(1.5));
+            let score = ((count_7d as f64 + 1.0).powf(0.8)) / ((hours_since_last + 2.0).powf(1.5));
 
             RankedHistoryItem {
                 slug: build_history_slug(&file_name, &url),
@@ -138,6 +158,7 @@ pub async fn load_ranked_history_items(
             .unwrap_or(std::cmp::Ordering::Equal)
     });
     items.truncate(50);
+    tracing::info!(count = items.len(), query = ?query_str, "ranked download history loaded");
     items
 }
 
