@@ -94,9 +94,9 @@ pub async fn web_proxy_handler(
     if is_cloudflare_challenge(upstream_response.headers()) && is_document_request(&headers) {
         tracing::info!(
             target_url = %target_url,
-            "cloudflare challenge detected; redirecting browser to original origin"
+            "cloudflare challenge detected; showing verification landing page"
         );
-        return direct_browser_verification_response(&target_url, &session_id);
+        return cloudflare_verification_landing(&target_url).into_response();
     }
 
     if upstream_response.status().is_redirection() {
@@ -1196,6 +1196,39 @@ fn direct_browser_verification_response(target_url: &Url, session_id: &str) -> R
         Body::from("Browser verification requires direct origin navigation."),
         session_id,
     )
+}
+
+fn cloudflare_verification_landing(target_url: &Url) -> HtmlResponse<String> {
+    HtmlResponse(format!(
+        r#"<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>安全验证 - Yundo Web Proxy</title>
+    <style>
+      body {{ font-family: system-ui, sans-serif; display: grid; place-items: center; min-height: 100vh; margin: 0; background: #f7f9ff; color: #171c22; }}
+      main {{ width: min(90vw, 480px); padding: 32px; background: #fff; border-radius: 16px; box-shadow: 0 8px 32px rgba(0,0,0,0.05); text-align: center; }}
+      h1 {{ font-size: 24px; margin: 0 0 16px; color: #0058bb; }}
+      p {{ line-height: 1.6; color: #424753; margin: 0 0 24px; }}
+      .btn {{ display: inline-block; padding: 12px 24px; background: #0058bb; color: #fff; text-decoration: none; border-radius: 8px; font-weight: 600; transition: opacity 0.2s; }}
+      .btn:hover {{ opacity: 0.9; }}
+      .footer {{ margin-top: 24px; font-size: 13px; color: #8e95a3; }}
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>安全验证</h1>
+      <p>目标网站 (<code>{host}</code>) 开启了 Cloudflare 防护或人机验证。由于技术限制，验证过程无法在代理中完成。</p>
+      <p>请点击下方按钮直接前往原站完成验证。验证成功后，您可以关闭页面并返回代理继续浏览。</p>
+      <a href="{url}" class="btn" target="_blank" rel="noopener noreferrer">前往原站验证</a>
+      <div class="footer">验证成功后，原站会在您的浏览器中存储 Cookie，随后代理请求将能正常通过。</div>
+    </main>
+  </body>
+</html>"#,
+        host = target_url.host_str().unwrap_or(""),
+        url = target_url.as_str()
+    ))
 }
 
 fn web_proxy_landing() -> HtmlResponse<&'static str> {
