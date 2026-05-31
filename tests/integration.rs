@@ -5,13 +5,17 @@ use axum::{
     routing::get,
     Router,
 };
+use lru::LruCache;
 use precision_proxy::{
     app::build_router,
     common::{initialize_cache_dir, initialize_database, parse_cache_size, AppState},
+    constants::MAX_WEB_COOKIE_SESSIONS,
+    state::CacheUsageTracker,
 };
 use reqwest::Client;
 use std::{
     net::SocketAddr,
+    num::NonZeroUsize,
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicUsize, Ordering},
@@ -20,7 +24,7 @@ use std::{
     time::Duration,
 };
 use tempfile::TempDir;
-use tokio::{fs, net::TcpListener, time::sleep};
+use tokio::{fs, net::TcpListener, sync::Mutex, time::sleep};
 use url::Url;
 
 #[tokio::test]
@@ -31,8 +35,6 @@ async fn parse_cache_size_supports_human_readable_units() {
     assert!(parse_cache_size("12XB").is_err());
 }
 
-
-
 #[tokio::test]
 async fn proxy_head_returns_filename_from_signed_url_query() {
     let cache_dir = TempDir::new().unwrap();
@@ -40,12 +42,10 @@ async fn proxy_head_returns_filename_from_signed_url_query() {
     let app = spawn_proxy_server(cache_dir.path().to_path_buf(), upstream, "/".to_string()).await;
 
     let mut signed_url = Url::parse("http://upstream.test/file").unwrap();
-    signed_url
-        .query_pairs_mut()
-        .append_pair(
-            "response-content-disposition",
-            "attachment; filename=Clash.Verge_2.4.7_x64-setup.exe",
-        );
+    signed_url.query_pairs_mut().append_pair(
+        "response-content-disposition",
+        "attachment; filename=Clash.Verge_2.4.7_x64-setup.exe",
+    );
 
     let response = Client::new()
         .head(format!(
@@ -140,7 +140,12 @@ async fn configured_base_path_mounts_routes_under_prefix() {
     let cache_dir = TempDir::new().unwrap();
     let upstream_hits = Arc::new(AtomicUsize::new(0));
     let upstream = spawn_upstream_server(upstream_hits).await;
-    let app = spawn_proxy_server(cache_dir.path().to_path_buf(), upstream, "/tools/yundo".to_string()).await;
+    let app = spawn_proxy_server(
+        cache_dir.path().to_path_buf(),
+        upstream,
+        "/tools/yundo".to_string(),
+    )
+    .await;
     let client = Client::new();
 
     let proxy_url = format!(
@@ -151,11 +156,47 @@ async fn configured_base_path_mounts_routes_under_prefix() {
     let download_response = client.get(&proxy_url).send().await.unwrap();
     assert_eq!(download_response.status(), StatusCode::OK);
 
-    let missing_root = client.get(format!("http://{app}/downloads")).send().await.unwrap();
+    let missing_root = client
+        .get(format!("http://{app}/downloads"))
+        .send()
+        .await
+        .unwrap();
     assert_eq!(missing_root.status(), StatusCode::NOT_FOUND);
 }
 
-async fn spawn_proxy_server(cache_dir: PathBuf, upstream_addr: SocketAddr, base_path: String) -> SocketAddr {
+#[tokio::test]
+async fn web_proxy_rewrites_page_without_touching_inline_scripts() {
+    let cache_dir = TempDir::new().unwrap();
+    let upstream = spawn_web_upstream_server().await;
+    let app = spawn_proxy_server(cache_dir.path().to_path_buf(), upstream, "/".to_string()).await;
+    let client = Client::new();
+    let url = format!(
+        "http://{}/browse?url={}",
+        app,
+        urlencoding::encode("http://upstream.test/webpage")
+    );
+
+    let response = client.get(url).send().await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers().get("content-type").unwrap(),
+        "text/html; charset=utf-8"
+    );
+
+    let body = response.text().await.unwrap();
+    assert!(body.contains("currency: £"));
+    assert!(body.contains("/browse/http%3A%2F%2Fupstream.test%2Fxjs%2Fscript.js"));
+    assert!(body.contains("Element.prototype.setAttribute"));
+    assert!(body.contains("const literal = 'src=/not-an-attr'"));
+    assert!(body.contains(r#"/https?:\/\//"#));
+    assert!(!body.contains("charset=ISO-8859-1"));
+}
+
+async fn spawn_proxy_server(
+    cache_dir: PathBuf,
+    upstream_addr: SocketAddr,
+    base_path: String,
+) -> SocketAddr {
     initialize_cache_dir(&cache_dir).await;
     let db = initialize_database(&cache_dir).await;
     let state = Arc::new(AppState {
@@ -164,16 +205,57 @@ async fn spawn_proxy_server(cache_dir: PathBuf, upstream_addr: SocketAddr, base_
             .resolve("upstream.test", upstream_addr)
             .build()
             .unwrap(),
+        web_client: Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .resolve("upstream.test", upstream_addr)
+            .build()
+            .unwrap(),
         cache_dir,
         max_cache_size: 64 * 1024 * 1024,
+        max_file_size: 64 * 1024 * 1024,
         filebox_size: 64 * 1024 * 1024,
         db,
         frontend_dist: PathBuf::from("./frontend/missing-dist"),
         base_path,
+        web_cookies: Mutex::new(LruCache::new(
+            NonZeroUsize::new(MAX_WEB_COOKIE_SESSIONS).unwrap(),
+        )),
+        cache_usage: Arc::new(CacheUsageTracker::new()),
+        api_key: None,
+        metrics_handle: None,
+        shutdown_token: tokio_util::sync::CancellationToken::new(),
     });
 
     let router = build_router(state, PathBuf::from("./frontend/missing-dist"));
     spawn_router(router).await
+}
+
+async fn spawn_web_upstream_server() -> SocketAddr {
+    async fn webpage() -> impl IntoResponse {
+        let body = b"<!doctype html><html><head><meta charset=\"ISO-8859-1\"><title>Fixture</title></head><body>currency: \xA3<script src=/xjs/script.js></script><script>const literal = 'src=/not-an-attr'; const re = /https?:\\/\\//; const img = new Image(); img.src = '/client_204?ok=1'; document.body.appendChild(img);</script></body></html>";
+        (
+            [("content-type", "text/html; charset=ISO-8859-1")],
+            Body::from(body.as_slice()),
+        )
+    }
+
+    async fn script() -> impl IntoResponse {
+        (
+            [("content-type", "application/javascript")],
+            "window.scriptLoaded = true;",
+        )
+    }
+
+    async fn client_204() -> impl IntoResponse {
+        StatusCode::NO_CONTENT
+    }
+
+    let app = Router::new()
+        .route("/webpage", get(webpage))
+        .route("/xjs/script.js", get(script))
+        .route("/client_204", get(client_204));
+
+    spawn_router(app).await
 }
 
 async fn spawn_upstream_server(hit_count: Arc<AtomicUsize>) -> SocketAddr {
@@ -193,12 +275,20 @@ async fn spawn_upstream_server(hit_count: Arc<AtomicUsize>) -> SocketAddr {
             if range == "bytes=1-3" {
                 response_headers.insert("content-range", HeaderValue::from_static("bytes 1-3/6"));
                 response_headers.insert("content-length", HeaderValue::from_static("3"));
-                return (StatusCode::PARTIAL_CONTENT, response_headers, Body::from("bcd"));
+                return (
+                    StatusCode::PARTIAL_CONTENT,
+                    response_headers,
+                    Body::from("bcd"),
+                );
             }
         }
 
         response_headers.insert("content-length", HeaderValue::from_static("6"));
-        (StatusCode::OK, response_headers, Body::from(body.as_slice()))
+        (
+            StatusCode::OK,
+            response_headers,
+            Body::from(body.as_slice()),
+        )
     }
 
     async fn head_file() -> impl IntoResponse {
@@ -275,7 +365,7 @@ async fn filebox_range_requests_supported() {
     // Insert to database
     sqlx::query(
         "INSERT INTO filebox_files (id, file_name, file_size, expires_at)
-         VALUES (?, ?, ?, datetime('now', '+1 day'))"
+         VALUES (?, ?, ?, datetime('now', '+1 day'))",
     )
     .bind(id)
     .bind(file_name)
@@ -295,28 +385,54 @@ async fn filebox_range_requests_supported() {
     assert_eq!(res.text().await.unwrap(), "abcdefghijklmnopqrstuvwxyz");
 
     // Test 2: Range Download (bytes=0-4)
-    let res = client.get(&download_url).header("Range", "bytes=0-4").send().await.unwrap();
+    let res = client
+        .get(&download_url)
+        .header("Range", "bytes=0-4")
+        .send()
+        .await
+        .unwrap();
     assert_eq!(res.status(), StatusCode::PARTIAL_CONTENT);
     assert_eq!(res.headers().get("content-range").unwrap(), "bytes 0-4/26");
     assert_eq!(res.headers().get("content-length").unwrap(), "5");
     assert_eq!(res.text().await.unwrap(), "abcde");
 
     // Test 3: Range Download (bytes=20-)
-    let res = client.get(&download_url).header("Range", "bytes=20-").send().await.unwrap();
+    let res = client
+        .get(&download_url)
+        .header("Range", "bytes=20-")
+        .send()
+        .await
+        .unwrap();
     assert_eq!(res.status(), StatusCode::PARTIAL_CONTENT);
-    assert_eq!(res.headers().get("content-range").unwrap(), "bytes 20-25/26");
+    assert_eq!(
+        res.headers().get("content-range").unwrap(),
+        "bytes 20-25/26"
+    );
     assert_eq!(res.headers().get("content-length").unwrap(), "6");
     assert_eq!(res.text().await.unwrap(), "uvwxyz");
 
     // Test 4: Range Download (bytes=-5) (last 5 bytes)
-    let res = client.get(&download_url).header("Range", "bytes=-5").send().await.unwrap();
+    let res = client
+        .get(&download_url)
+        .header("Range", "bytes=-5")
+        .send()
+        .await
+        .unwrap();
     assert_eq!(res.status(), StatusCode::PARTIAL_CONTENT);
-    assert_eq!(res.headers().get("content-range").unwrap(), "bytes 21-25/26");
+    assert_eq!(
+        res.headers().get("content-range").unwrap(),
+        "bytes 21-25/26"
+    );
     assert_eq!(res.headers().get("content-length").unwrap(), "5");
     assert_eq!(res.text().await.unwrap(), "vwxyz");
 
     // Test 5: Range Download Out of Bounds (bytes=100-) -> 416
-    let res = client.get(&download_url).header("Range", "bytes=100-").send().await.unwrap();
+    let res = client
+        .get(&download_url)
+        .header("Range", "bytes=100-")
+        .send()
+        .await
+        .unwrap();
     assert_eq!(res.status(), StatusCode::RANGE_NOT_SATISFIABLE);
     assert_eq!(res.headers().get("content-range").unwrap(), "bytes */26");
 }

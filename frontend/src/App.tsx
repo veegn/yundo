@@ -3,6 +3,7 @@ import Layout from './components/Layout';
 import Dashboard from './pages/Dashboard';
 import ProxyDash from './pages/ProxyDash';
 import FileBox from './pages/FileBox';
+import WebProxy from './pages/WebProxy';
 import NotFound from './pages/NotFound';
 import { getBasePath } from './utils/basePath';
 import { I18nProvider } from './context/I18nContext';
@@ -18,6 +19,7 @@ export default function App() {
             <Route index element={<Dashboard />} />
             <Route path="proxydash" element={<ProxyDash />} />
             <Route path="filebox" element={<FileBox />} />
+            <Route path="webproxy" element={<WebProxy />} />
             <Route path="*" element={<NotFound />} />
           </Route>
         </Routes>
@@ -25,4 +27,3 @@ export default function App() {
     </I18nProvider>
   );
 }
-

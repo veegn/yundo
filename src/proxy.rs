@@ -2,7 +2,7 @@ use crate::{
     cache::try_serve_from_cache,
     common::{
         build_content_disposition, ensure_download_filename, extract_filename_from_url,
-        is_forbidden_host, resolve_file_name, AppState, ProxyQuery, ALLOWED_HEADERS,
+        is_forbidden_hostname, resolve_file_name, AppState, ProxyQuery, ALLOWED_HEADERS,
     },
     history::record_download,
 };
@@ -57,7 +57,7 @@ pub(crate) async fn proxy_handler(
         .host_str()
         .unwrap_or_default()
         .to_ascii_lowercase();
-    if is_forbidden_host(&host) {
+    if is_forbidden_hostname(&host) {
         tracing::warn!(target_url = %target_url, host = %host, "proxy request rejected: forbidden host");
         return (
             axum::http::StatusCode::FORBIDDEN,
@@ -117,6 +117,8 @@ pub(crate) async fn proxy_handler(
         Ok(response) => response,
         Err(err) => {
             tracing::error!(target_url = %target_url, error = %err, "proxy upstream request failed");
+            ::metrics::counter!("yundo_proxy_upstream_errors_total", "proxy" => "download")
+                .increment(1);
             return (
                 axum::http::StatusCode::BAD_GATEWAY,
                 "failed to reach target server",
@@ -230,6 +232,7 @@ pub(crate) async fn proxy_handler(
                 }
                 Err(err) => {
                     let _ = tx.send(Err(std::io::Error::other(err.to_string()))).await;
+                    ::metrics::counter!("yundo_proxy_upstream_errors_total", "proxy" => "download_stream").increment(1);
                     tracing::warn!(
                         target_url = %stream_target_url,
                         cache_key = %cache_key,
@@ -321,7 +324,7 @@ pub(crate) async fn proxy_head_handler(
         .host_str()
         .unwrap_or_default()
         .to_ascii_lowercase();
-    if is_forbidden_host(&host) {
+    if is_forbidden_hostname(&host) {
         tracing::warn!(target_url = %target_url, host = %host, "proxy HEAD request rejected: forbidden host");
         return (
             axum::http::StatusCode::FORBIDDEN,

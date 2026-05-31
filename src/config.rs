@@ -25,6 +25,15 @@ pub struct Args {
 
     #[arg(long, default_value = "/", value_parser = normalize_base_path)]
     pub base_path: String,
+
+    #[arg(long, default_value = "500MB", value_parser = parse_cache_size)]
+    pub max_file_size: u64,
+
+    #[arg(long)]
+    pub api_key: Option<String>,
+
+    #[arg(long, default_value_t = 60)]
+    pub rate_limit_per_minute: u64,
 }
 
 pub fn parse_cache_size(input: &str) -> Result<u64, String> {

@@ -6,6 +6,7 @@ const translations = {
     'nav.home': '首页',
     'nav.history': '历史记录',
     'nav.filebox': '临时文件箱',
+    'nav.webproxy': '网页代理',
     'footer.desc': '高效、稳定的文件代理下载服务，让资源获取更简单。',
     'footer.github': 'GitHub',
     'footer.privacy': '隐私政策',
@@ -81,6 +82,16 @@ const translations = {
     'filebox.action.delete': '删除',
     'filebox.expires.expired': '已过期',
 
+    // Web Proxy Page
+    'webproxy.title': '网页代理',
+    'webproxy.subtitle': '通过云渡打开公开 HTTP/HTTPS 网页。动态请求与 Cookie 会按代理会话隔离。',
+    'webproxy.btn_open': '打开网页',
+    'webproxy.err_invalid': '请输入有效的 HTTP/HTTPS 链接',
+    'webproxy.notice_title': '使用说明',
+    'webproxy.notice_cookie': '目标网站 Cookie 会保存在服务端隔离会话中，不会与其他网站共享。',
+    'webproxy.notice_limit': 'HTML、CSS、脚本、跳转、fetch、XHR、表单和 window.open 会被改写并留在代理内。',
+    'webproxy.notice_login': '请勿将该功能用于敏感登录、支付或私密账号操作。',
+
     // NotFound (404) Page
     'seo.notfound.title': '404 - 页面不存在 | 云渡',
     'seo.notfound.description': '你访问的页面不存在，将在 5 秒后返回云渡首页。',
@@ -96,6 +107,7 @@ const translations = {
     'nav.home': 'Home',
     'nav.history': 'History',
     'nav.filebox': 'File Box',
+    'nav.webproxy': 'Web Proxy',
     'footer.desc': 'Efficient and stable file proxy download service, making resource acquisition simpler.',
     'footer.github': 'GitHub',
     'footer.privacy': 'Privacy Policy',
@@ -170,6 +182,16 @@ const translations = {
     'filebox.action.download': 'Download',
     'filebox.action.delete': 'Delete',
     'filebox.expires.expired': 'Expired',
+
+    // Web Proxy Page
+    'webproxy.title': 'Web Proxy',
+    'webproxy.subtitle': 'Open a public HTTP/HTTPS web page through Yundo. Dynamic requests and cookies are isolated by proxy session.',
+    'webproxy.btn_open': 'Open Page',
+    'webproxy.err_invalid': 'Please enter a valid HTTP/HTTPS URL',
+    'webproxy.notice_title': 'Usage notes',
+    'webproxy.notice_cookie': 'Cookies from target websites are stored in an isolated server-side session and are not shared with other websites.',
+    'webproxy.notice_limit': 'HTML, CSS, scripts, redirects, fetch, XHR, forms, and window.open are rewritten to stay inside the proxy.',
+    'webproxy.notice_login': 'Do not use this feature for sensitive login, payment, or private account workflows.',
 
     // NotFound (404) Page
     'seo.notfound.title': '404 - Page Not Found | Yundo',

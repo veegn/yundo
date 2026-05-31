@@ -1,28 +1,26 @@
 use crate::{
     common::{health_handler, root_handler, AppState},
     history::history_handler,
+    metrics::{metrics_handler, track_http_metrics},
+    middleware::require_api_key,
     proxy::{proxy_handler, proxy_head_handler},
+    web_proxy::web_proxy_handler,
 };
 use axum::{
     extract::{OriginalUri, State},
     http::{header, HeaderMap, StatusCode},
+    middleware,
     response::{Html, IntoResponse, Redirect},
-    routing::get,
+    routing::{any, get},
     Router,
 };
 use std::{path::PathBuf, sync::Arc};
 use tokio::fs;
-use tower_http::{
-    cors::CorsLayer,
-    services::ServeDir,
-    trace::TraceLayer,
-};
+use tower_http::{cors::CorsLayer, services::ServeDir, trace::TraceLayer};
 
 pub fn build_router(state: Arc<AppState>, frontend_dist: PathBuf) -> Router {
-    let mut inner_router = Router::new()
-        .route("/api/proxy", get(proxy_handler).head(proxy_head_handler))
-        .route("/api/recent", get(history_handler))
-        .route("/api/filebox/files", get(crate::filebox::list_filebox_handler))
+    // Routes that require authentication (if API key is configured)
+    let protected_routes = Router::new()
         .route(
             "/api/filebox/upload",
             axum::routing::post(crate::filebox::upload_filebox_handler)
@@ -46,10 +44,33 @@ pub fn build_router(state: Arc<AppState>, frontend_dist: PathBuf) -> Router {
             "/api/filebox/remote-upload",
             axum::routing::post(crate::filebox::remote_upload_filebox_handler),
         )
-        .route("/api/filebox/download/:id", get(crate::filebox::download_filebox_handler))
-        .route("/api/filebox/delete/:id", axum::routing::delete(crate::filebox::delete_filebox_handler))
+        .route(
+            "/api/filebox/delete/:id",
+            axum::routing::delete(crate::filebox::delete_filebox_handler),
+        )
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            require_api_key,
+        ));
+
+    let mut inner_router = Router::new()
+        .route("/api/proxy", get(proxy_handler).head(proxy_head_handler))
+        .route("/browse", any(web_proxy_handler))
+        .route("/browse/*target", any(web_proxy_handler))
+        .route("/api/recent", get(history_handler))
+        .route("/metrics", get(metrics_handler))
+        .route(
+            "/api/filebox/files",
+            get(crate::filebox::list_filebox_handler),
+        )
+        .route(
+            "/api/filebox/download/:id",
+            get(crate::filebox::download_filebox_handler),
+        )
+        .merge(protected_routes)
         .route("/healthz", get(health_handler))
         .layer(CorsLayer::permissive())
+        .layer(middleware::from_fn(track_http_metrics))
         .layer(TraceLayer::new_for_http());
 
     if frontend_dist.join("index.html").exists() {
@@ -57,6 +78,7 @@ pub fn build_router(state: Arc<AppState>, frontend_dist: PathBuf) -> Router {
         inner_router = inner_router
             .route("/", get(spa_index_handler))
             .route("/filebox", get(spa_index_handler))
+            .route("/webproxy", get(spa_index_handler))
             .route("/index.html", get(spa_index_handler))
             .nest_service("/assets", ServeDir::new(frontend_dist.join("assets")))
             .fallback(get(base_aware_not_found_handler));
@@ -79,7 +101,10 @@ pub fn build_router(state: Arc<AppState>, frontend_dist: PathBuf) -> Router {
     } else {
         let redirect_target = state.base_path.clone();
         Router::new()
-            .route("/", get(move || async move { Redirect::permanent(&redirect_target) }))
+            .route(
+                "/",
+                get(move || async move { Redirect::permanent(&redirect_target) }),
+            )
             .nest(&state.base_path, inner_router)
     };
 
@@ -89,7 +114,13 @@ pub fn build_router(state: Arc<AppState>, frontend_dist: PathBuf) -> Router {
 async fn spa_index_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    OriginalUri(uri): OriginalUri,
 ) -> impl IntoResponse {
+    if let Some(redirect) = redirect_escaped_web_proxy_navigation(&headers, &uri, &state.base_path)
+    {
+        return redirect.into_response();
+    }
+
     let index_path = state.frontend_dist.join("index.html");
     let Ok(template) = fs::read_to_string(&index_path).await else {
         return (
@@ -138,6 +169,11 @@ async fn base_aware_not_found_handler(
     headers: HeaderMap,
     OriginalUri(uri): OriginalUri,
 ) -> impl IntoResponse {
+    if let Some(redirect) = redirect_escaped_web_proxy_navigation(&headers, &uri, &state.base_path)
+    {
+        return redirect.into_response();
+    }
+
     let base_path = derive_external_base_path(&headers, &state.base_path);
     let home_path = prefix_path(&base_path, "/");
     let escaped_path = uri
@@ -225,6 +261,66 @@ async fn base_aware_not_found_handler(
 </html>"#
         )),
     )
+        .into_response()
+}
+
+fn redirect_escaped_web_proxy_navigation(
+    headers: &HeaderMap,
+    uri: &axum::http::Uri,
+    configured_base_path: &str,
+) -> Option<Redirect> {
+    let referer = headers.get(header::REFERER)?.to_str().ok()?;
+    let referer_url = url::Url::parse(referer).ok()?;
+    let target = target_from_browse_referer(&referer_url)
+        .or_else(|| target_from_web_proxy_cookie(headers))?;
+    let target_url = url::Url::parse(&target).ok()?;
+    let escaped_path = uri
+        .path_and_query()
+        .map(|value| value.as_str())
+        .unwrap_or("/");
+    let joined = target_url.join(escaped_path).ok()?;
+    let proxy_prefix = prefix_path(configured_base_path, "/browse");
+    let redirect_to = format!(
+        "{}/{}",
+        proxy_prefix.trim_end_matches('/'),
+        urlencoding::encode(joined.as_str())
+    );
+    Some(Redirect::temporary(&redirect_to))
+}
+
+fn target_from_web_proxy_cookie(headers: &HeaderMap) -> Option<String> {
+    let cookie = headers.get(header::COOKIE)?.to_str().ok()?;
+    for part in cookie.split(';') {
+        let Some((name, value)) = part.trim().split_once('=') else {
+            continue;
+        };
+        if name == "__YUNDO_WEB_TARGET" && !value.trim().is_empty() {
+            return urlencoding::decode(value)
+                .ok()
+                .map(|decoded| decoded.into_owned());
+        }
+    }
+    None
+}
+
+fn target_from_browse_referer(referer: &url::Url) -> Option<String> {
+    let path = referer.path();
+    let marker = "/browse/";
+    if let Some(index) = path.find(marker) {
+        return urlencoding::decode(&path[index + marker.len()..])
+            .ok()
+            .map(|value| value.into_owned());
+    }
+
+    if path.ends_with("/browse") {
+        for (key, value) in referer.query_pairs() {
+            if key == "url" && !value.trim().is_empty() {
+                return Some(value.into_owned());
+            }
+        }
+    }
+
+    None
 }
 
 fn html_escape(input: &str) -> String {
@@ -239,7 +335,9 @@ fn html_escape(input: &str) -> String {
 pub fn derive_external_base_path(headers: &HeaderMap, configured_base_path: &str) -> String {
     header_value(headers, "x-forwarded-prefix")
         .and_then(|value| normalize_base_path(&value))
-        .unwrap_or_else(|| normalize_base_path(configured_base_path).unwrap_or_else(|| "/".to_string()))
+        .unwrap_or_else(|| {
+            normalize_base_path(configured_base_path).unwrap_or_else(|| "/".to_string())
+        })
 }
 
 pub fn prefix_path(base_path: &str, path: &str) -> String {
@@ -260,14 +358,10 @@ pub fn prefix_path(base_path: &str, path: &str) -> String {
 }
 
 fn header_value(headers: &HeaderMap, name: &str) -> Option<String> {
-    headers.get(name).and_then(|value| value.to_str().ok()).map(|value| {
-        value
-            .split(',')
-            .next()
-            .unwrap_or(value)
-            .trim()
-            .to_string()
-    })
+    headers
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.split(',').next().unwrap_or(value).trim().to_string())
 }
 
 fn normalize_base_path(input: &str) -> Option<String> {

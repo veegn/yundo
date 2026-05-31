@@ -168,13 +168,9 @@ fn percent_encode_utf8(value: &str) -> String {
 
     for byte in value.as_bytes() {
         match byte {
-            b'A'..=b'Z'
-            | b'a'..=b'z'
-            | b'0'..=b'9'
-            | b'-'
-            | b'.'
-            | b'_'
-            | b'~' => encoded.push(*byte as char),
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                encoded.push(*byte as char)
+            }
             _ => encoded.push_str(&format!("%{:02X}", byte)),
         }
     }

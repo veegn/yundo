@@ -1,4 +1,4 @@
-use crate::common::HistoryItem;
+use crate::{common::HistoryItem, constants::HISTORY_CLEANUP_INTERVAL};
 use sha2::{Digest, Sha256};
 use sqlx::{Row, SqlitePool};
 
@@ -17,18 +17,28 @@ pub struct RankedHistoryItem {
 // Background task
 // ---------------------------------------------------------------------------
 
-pub fn spawn_history_cleanup_task(db: SqlitePool) {
+pub fn spawn_history_cleanup_task(
+    db: SqlitePool,
+    shutdown_token: tokio_util::sync::CancellationToken,
+) {
     tokio::spawn(async move {
         loop {
-            tokio::time::sleep(tokio::time::Duration::from_secs(3600)).await;
-            if let Err(err) = sqlx::query(
-                "DELETE FROM download_events
-                 WHERE downloaded_at < datetime('now', '-7 days')",
-            )
-            .execute(&db)
-            .await
-            {
-                tracing::warn!("cleanup old download events failed: {err}");
+            tokio::select! {
+                _ = tokio::time::sleep(HISTORY_CLEANUP_INTERVAL) => {
+                    if let Err(err) = sqlx::query(
+                        "DELETE FROM download_events
+                         WHERE downloaded_at < datetime('now', '-7 days')",
+                    )
+                    .execute(&db)
+                    .await
+                    {
+                        tracing::warn!("cleanup old download events failed: {err}");
+                    }
+                }
+                _ = shutdown_token.cancelled() => {
+                    tracing::info!("History cleanup task shutting down");
+                    break;
+                }
             }
         }
     });

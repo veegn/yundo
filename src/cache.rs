@@ -1,5 +1,6 @@
 use crate::{
     common::{ensure_download_filename, AppState, CacheMeta},
+    constants::CACHE_EVICTION_INTERVAL,
     history::record_download,
 };
 use axum::{
@@ -13,15 +14,19 @@ use tokio_util::io::ReaderStream;
 
 use sqlx::Row;
 
-pub async fn get_combined_used_size(cache_dir: &Path, db: &sqlx::SqlitePool) -> u64 {
+/// Calculate actual disk usage by traversing directories.
+/// This is expensive and should only be called periodically for calibration.
+pub async fn calculate_actual_usage(cache_dir: &Path, db: &sqlx::SqlitePool) -> u64 {
     // 1. Get active filebox files size from DB
-    let filebox_size = sqlx::query("SELECT COALESCE(SUM(file_size), 0) AS total_size FROM filebox_files WHERE expires_at >= datetime('now')")
-        .fetch_one(db)
-        .await
-        .map(|row| row.get::<i64, _>("total_size") as u64)
-        .unwrap_or(0);
+    let filebox_size = sqlx::query(
+        "SELECT COALESCE(SUM(file_size), 0) AS total_size FROM filebox_files WHERE expires_at >= datetime('now')"
+    )
+    .fetch_one(db)
+    .await
+    .map(|row| row.get::<i64, _>("total_size") as u64)
+    .unwrap_or(0);
 
-    // 2. Calculate directory sizes synchronously in a blocking thread to avoid async task-spawning latency
+    // 2. Calculate directory sizes synchronously in a blocking thread
     let cache_dir_buf = cache_dir.to_path_buf();
     let disk_size = tokio::task::spawn_blocking(move || {
         let mut proxy_cache_size = 0_u64;
@@ -65,12 +70,41 @@ pub async fn get_combined_used_size(cache_dir: &Path, db: &sqlx::SqlitePool) -> 
     filebox_size + disk_size
 }
 
+/// Get combined used size, using cached value or calculating if needed.
+pub async fn get_combined_used_size(
+    cache_dir: &Path,
+    db: &sqlx::SqlitePool,
+    state: &AppState,
+) -> u64 {
+    // Check if we need to recalibrate
+    if state.cache_usage.should_recalibrate().await {
+        let actual = calculate_actual_usage(cache_dir, db).await;
+        state.cache_usage.set(actual);
+        state.cache_usage.mark_calibrated().await;
+        ::metrics::gauge!("yundo_cache_usage_bytes").set(actual as f64);
+        tracing::debug!("Cache usage recalibrated: {} bytes", actual);
+        actual
+    } else {
+        let usage = state.cache_usage.get();
+        ::metrics::gauge!("yundo_cache_usage_bytes").set(usage as f64);
+        usage
+    }
+}
+
 pub fn spawn_cache_eviction_task(state: Arc<AppState>) {
+    let shutdown_token = state.shutdown_token.clone();
     tokio::spawn(async move {
         loop {
-            tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
-            if let Err(err) = enforce_cache_size(&state).await {
-                tracing::error!("cache eviction failed: {err}");
+            tokio::select! {
+                _ = tokio::time::sleep(CACHE_EVICTION_INTERVAL) => {
+                    if let Err(err) = enforce_cache_size(&state).await {
+                        tracing::error!("cache eviction failed: {err}");
+                    }
+                }
+                _ = shutdown_token.cancelled() => {
+                    tracing::info!("Cache eviction task shutting down");
+                    break;
+                }
             }
         }
     });
@@ -79,7 +113,7 @@ pub fn spawn_cache_eviction_task(state: Arc<AppState>) {
 pub(crate) async fn enforce_cache_size(state: &AppState) -> std::io::Result<()> {
     let cache_dir_buf = state.cache_dir.to_path_buf();
 
-    // 1. Calculate proxy cache files size and gather their modified dates synchronously inside spawn_blocking
+    // 1. Calculate proxy cache files size and gather their modified dates synchronously
     let (mut files, proxy_cache_size) = tokio::task::spawn_blocking(move || {
         let mut files = Vec::new();
         let mut proxy_cache_size = 0_u64;
@@ -103,13 +137,19 @@ pub(crate) async fn enforce_cache_size(state: &AppState) -> std::io::Result<()> 
     .unwrap_or((Vec::new(), 0));
 
     // 2. Get active filebox files size from DB
-    let filebox_size = sqlx::query("SELECT COALESCE(SUM(file_size), 0) AS total_size FROM filebox_files WHERE expires_at >= datetime('now')")
-        .fetch_one(&state.db)
-        .await
-        .map(|row| row.get::<i64, _>("total_size") as u64)
-        .unwrap_or(0);
+    let filebox_size = sqlx::query(
+        "SELECT COALESCE(SUM(file_size), 0) AS total_size FROM filebox_files WHERE expires_at >= datetime('now')"
+    )
+    .fetch_one(&state.db)
+    .await
+    .map(|row| row.get::<i64, _>("total_size") as u64)
+    .unwrap_or(0);
 
     let mut total_size = proxy_cache_size + filebox_size;
+
+    // Update the atomic counter
+    state.cache_usage.set(total_size);
+    ::metrics::gauge!("yundo_cache_usage_bytes").set(total_size as f64);
 
     if total_size <= state.max_cache_size {
         return Ok(());
@@ -133,6 +173,8 @@ pub(crate) async fn enforce_cache_size(state: &AppState) -> std::io::Result<()> 
         let meta_path = path.with_extension("meta");
         if fs::remove_file(path).await.is_ok() {
             total_size = total_size.saturating_sub(*size);
+            state.cache_usage.sub(*size);
+            ::metrics::gauge!("yundo_cache_usage_bytes").set(total_size as f64);
             tracing::info!(
                 path = %path.display(),
                 size,
@@ -159,6 +201,7 @@ pub(crate) async fn try_serve_from_cache(
     file_name: String,
 ) -> Option<axum::response::Response> {
     if !(data_path.exists() && meta_path.exists()) {
+        ::metrics::counter!("yundo_proxy_cache_requests_total", "result" => "miss").increment(1);
         tracing::info!(target_url = %target_url, "proxy cache miss");
         return None;
     }
@@ -172,6 +215,8 @@ pub(crate) async fn try_serve_from_cache(
                 error = %err,
                 "failed to read proxy cache metadata"
             );
+            ::metrics::counter!("yundo_proxy_cache_requests_total", "result" => "miss")
+                .increment(1);
             return None;
         }
     };
@@ -184,6 +229,8 @@ pub(crate) async fn try_serve_from_cache(
                 error = %err,
                 "failed to parse proxy cache metadata"
             );
+            ::metrics::counter!("yundo_proxy_cache_requests_total", "result" => "miss")
+                .increment(1);
             return None;
         }
     };
@@ -196,6 +243,8 @@ pub(crate) async fn try_serve_from_cache(
                 error = %err,
                 "failed to open proxy cache data"
             );
+            ::metrics::counter!("yundo_proxy_cache_requests_total", "result" => "miss")
+                .increment(1);
             return None;
         }
     };
@@ -221,6 +270,7 @@ pub(crate) async fn try_serve_from_cache(
         status = %status,
         "proxy cache hit"
     );
+    ::metrics::counter!("yundo_proxy_cache_requests_total", "result" => "hit").increment(1);
     record_download(db, target_url, file_name, file_size).await;
 
     let body = Body::from_stream(ReaderStream::new(file));
