@@ -1,10 +1,20 @@
 import { useI18n } from '../context/I18nContext';
+import { useNavigate } from 'react-router-dom';
 
 export default function Privacy() {
   const { locale } = useI18n();
+  const navigate = useNavigate();
 
   return (
-    <main className="flex-1 py-12 px-6 max-w-4xl mx-auto">
+    <main className="flex-1 py-12 px-6 max-w-4xl mx-auto w-full relative">
+      <button 
+        onClick={() => navigate(-1)}
+        className="absolute right-10 top-16 p-2 rounded-full hover:bg-surface-container-highest transition-colors text-on-surface-variant z-10"
+        title={locale === 'zh' ? '关闭' : 'Close'}
+      >
+        <span className="material-symbols-outlined">close</span>
+      </button>
+
       <div className="bg-surface-container rounded-3xl p-8 md:p-12 shadow-sm border border-outline-variant/10">
         {locale === 'zh' ? (
           <article className="prose prose-slate max-w-none">
