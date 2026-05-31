@@ -17,8 +17,8 @@ pub const FILEBOX_EXPIRATION_DAYS: i64 = 7;
 /// Maximum age for abandoned temporary chunk directories (24 hours)
 pub const TEMP_CHUNK_MAX_AGE_SECS: u64 = 86400;
 
-/// Maximum size for web proxy text rewriting (10 MB)
-pub const MAX_REWRITE_BYTES: usize = 10 * 1024 * 1024;
+/// Maximum size for web proxy text rewriting (50 MB)
+pub const MAX_REWRITE_BYTES: usize = 50 * 1024 * 1024;
 
 /// Default maximum file size (0 = unlimited)
 pub const DEFAULT_MAX_FILE_SIZE: u64 = 0;

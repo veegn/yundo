@@ -8,6 +8,11 @@ export default function Layout() {
   const { locale, changeLanguage, t } = useI18n();
   const [dropdownOpen, setDropdownOpen] = useState(false);
   const dropdownRef = useRef<HTMLDivElement>(null);
+  const navLinks = [
+    { to: '/', label: t('nav.home') },
+    { to: '/filebox', label: t('nav.filebox') },
+    { to: '/webproxy', label: t('nav.webproxy') },
+  ];
 
   useEffect(() => {
     function handleClickOutside(event: MouseEvent) {
@@ -33,45 +38,22 @@ export default function Layout() {
               <span className="text-xl font-bold tracking-tight text-on-surface">{logoText}</span>
             </Link>
             <div className="hidden md:flex items-center gap-8 font-medium text-sm">
-              <Link
-                to="/"
-                className={`transition-all relative py-1 ${
-                  location.pathname === '/'
-                    ? 'text-on-surface'
-                    : 'text-on-surface-variant hover:text-primary'
-                }`}
-              >
-                {t('nav.home')}
-                {location.pathname === '/' && (
-                  <span className="absolute bottom-0 left-0 w-full h-0.5 bg-primary rounded-full" />
-                )}
-              </Link>
-              <Link
-                to="/filebox"
-                className={`transition-all relative py-1 ${
-                  location.pathname === '/filebox'
-                    ? 'text-on-surface'
-                    : 'text-on-surface-variant hover:text-primary'
-                }`}
-              >
-                {t('nav.filebox')}
-                {location.pathname === '/filebox' && (
-                  <span className="absolute bottom-0 left-0 w-full h-0.5 bg-primary rounded-full" />
-                )}
-              </Link>
-              <Link
-                to="/webproxy"
-                className={`transition-all relative py-1 ${
-                  location.pathname === '/webproxy'
-                    ? 'text-on-surface'
-                    : 'text-on-surface-variant hover:text-primary'
-                }`}
-              >
-                {t('nav.webproxy')}
-                {location.pathname === '/webproxy' && (
-                  <span className="absolute bottom-0 left-0 w-full h-0.5 bg-primary rounded-full" />
-                )}
-              </Link>
+              {navLinks.map((link) => (
+                <Link
+                  key={link.to}
+                  to={link.to}
+                  className={`transition-all relative py-1 ${
+                    location.pathname === link.to
+                      ? 'text-on-surface'
+                      : 'text-on-surface-variant hover:text-primary'
+                  }`}
+                >
+                  {link.label}
+                  {location.pathname === link.to && (
+                    <span className="absolute bottom-0 left-0 w-full h-0.5 bg-primary rounded-full" />
+                  )}
+                </Link>
+              ))}
             </div>
           </div>
           <div className="flex items-center gap-4">
@@ -132,6 +114,26 @@ export default function Layout() {
             </a>
           </div>
         </div>
+        <div className="md:hidden border-t border-outline-variant/20 px-4 pb-2">
+          <div className="flex gap-2 overflow-x-auto pt-2 [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+            {navLinks.map((link) => {
+              const active = location.pathname === link.to;
+              return (
+                <Link
+                  key={link.to}
+                  to={link.to}
+                  className={`shrink-0 rounded-full px-4 py-2 text-sm font-semibold transition-colors ${
+                    active
+                      ? 'bg-primary text-on-primary shadow-sm'
+                      : 'bg-surface-container-low text-on-surface-variant hover:bg-surface-container-high hover:text-primary'
+                  }`}
+                >
+                  {link.label}
+                </Link>
+              );
+            })}
+          </div>
+        </div>
       </nav>
 
       <Outlet />
@@ -164,4 +166,3 @@ export default function Layout() {
     </div>
   );
 }
-

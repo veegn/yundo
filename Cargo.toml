@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-axum = { version = "0.7", features = ["multipart"] }
+axum = { version = "0.7", features = ["multipart", "ws"] }
 tokio = { version = "1.36", features = ["full"] }
 reqwest = { version = "0.12", features = ["stream", "rustls-tls", "hickory-dns"] }
 url = "2.5"
@@ -33,6 +33,8 @@ metrics = "0.22"
 metrics-exporter-prometheus = "0.13"
 lru = "0.12"
 hickory-resolver = "0.24"
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
+uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
 tempfile = "3"

@@ -1,25 +1,38 @@
-use crate::common::{is_forbidden_hostname, AppState};
+use crate::{
+    common::{validate_url_safe, AppState},
+    constants::MAX_REWRITE_BYTES,
+};
 use axum::{
     body::{to_bytes, Body},
-    extract::{OriginalUri, State},
+    extract::{
+        ws::{Message as AxumWsMessage, WebSocket, WebSocketUpgrade},
+        OriginalUri, State,
+    },
     http::{header, HeaderMap, HeaderName, HeaderValue, Method, StatusCode},
     response::{Html as HtmlResponse, IntoResponse, Response},
 };
 use bytes::Bytes;
 use encoding_rs::{Encoding, UTF_8};
 use flate2::read::{GzDecoder, ZlibDecoder};
-use std::{
-    collections::HashMap,
-    io::Read,
-    sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
-};
-use futures_util::StreamExt;
+use futures_util::{SinkExt, StreamExt};
+use std::{collections::HashMap, io::Read, sync::Arc};
 use tokio_stream::wrappers::ReceiverStream;
+use tokio_tungstenite::{connect_async, tungstenite};
 use url::Url;
 
 const WEB_SESSION_COOKIE: &str = "__YUNDO_WEB_SID";
-const MAX_REWRITE_BYTES: usize = 10 * 1024 * 1024;
+const CHARSET_DETECTION_BYTES: usize = 16 * 1024; // 16KB for charset detection
+const MAX_DECOMPRESSED_REWRITE_BYTES: usize = MAX_REWRITE_BYTES * 2;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WebCookie {
+    name: String,
+    value: String,
+    domain: String,
+    path: String,
+    secure: bool,
+    host_only: bool,
+}
 
 #[derive(Clone, Copy)]
 enum RewriteKind {
@@ -34,6 +47,7 @@ pub async fn web_proxy_handler(
     OriginalUri(uri): OriginalUri,
     method: Method,
     headers: HeaderMap,
+    ws: Option<WebSocketUpgrade>,
     body: Body,
 ) -> Response {
     let Some(target_url) = target_from_uri(uri.path(), uri.query()) else {
@@ -45,27 +59,34 @@ pub async fn web_proxy_handler(
         Err(message) => return (StatusCode::BAD_REQUEST, message).into_response(),
     };
 
-    if let Err(message) = validate_target_url(&target_url) {
+    if let Err(message) = validate_target_url(&target_url).await {
         return (StatusCode::FORBIDDEN, message).into_response();
     }
 
     let proxy_prefix = proxy_prefix_from_path(uri.path());
     let session_id = session_id_from_headers(&headers).unwrap_or_else(new_session_id);
-    if is_douyin_host(&target_url) && is_document_request(&headers) {
-        tracing::info!(
-            target_url = %target_url,
-            "douyin document navigation detected; redirecting browser to original origin"
-        );
-        return direct_browser_verification_response(&target_url, &session_id);
-    }
-
     let cookie_scope = cookie_scope(&session_id, &target_url);
+    if is_websocket_request(&headers) {
+        let Some(ws) = ws else {
+            return (StatusCode::BAD_REQUEST, "invalid websocket upgrade").into_response();
+        };
+        let target_ws_url = websocket_target_url(&target_url);
+        let cookie_header =
+            upstream_cookie_header(&state, &cookie_scope, &headers, &target_url).await;
+        return ws
+            .on_upgrade(move |socket| {
+                websocket_proxy(socket, target_ws_url, headers, cookie_header)
+            })
+            .into_response();
+    }
     let mut upstream = state
         .web_client
         .request(reqwest_method(&method), target_url.clone())
         .headers(upstream_request_headers(&headers));
 
-    if let Some(cookie_header) = upstream_cookie_header(&state, &cookie_scope, &headers).await {
+    if let Some(cookie_header) =
+        upstream_cookie_header(&state, &cookie_scope, &headers, &target_url).await
+    {
         upstream = upstream.header(reqwest::header::COOKIE, cookie_header);
     }
 
@@ -89,7 +110,13 @@ pub async fn web_proxy_handler(
         }
     };
 
-    persist_upstream_cookies(&state, &cookie_scope, upstream_response.headers()).await;
+    persist_upstream_cookies(
+        &state,
+        &cookie_scope,
+        &target_url,
+        upstream_response.headers(),
+    )
+    .await;
 
     if is_cloudflare_challenge(upstream_response.headers()) && is_document_request(&headers) {
         tracing::info!(
@@ -142,14 +169,28 @@ pub async fn web_proxy_handler(
         };
 
         if bytes.len() > MAX_REWRITE_BYTES {
+            tracing::warn!(
+                target_url = %target_url,
+                size = bytes.len(),
+                limit = MAX_REWRITE_BYTES,
+                "Response too large for web proxy rewriting"
+            );
             return (
                 StatusCode::PAYLOAD_TOO_LARGE,
-                "response is too large for web page rewriting",
+                format!(
+                    "Response size ({:.1}MB) exceeds the {}MB limit for web proxy. \
+                     Large files should be downloaded via direct proxy instead.",
+                    bytes.len() as f64 / 1024.0 / 1024.0,
+                    MAX_REWRITE_BYTES / 1024 / 1024
+                ),
             )
                 .into_response();
         }
 
-        let bytes = decompress_text_bytes(bytes, &content_encoding);
+        let bytes = match decompress_text_bytes(bytes, &content_encoding) {
+            Ok(bytes) => bytes,
+            Err(err) => return err.into_response(),
+        };
         let text = decode_text_response(&bytes, &content_type, kind);
         if matches!(kind, RewriteKind::Html)
             && is_document_request(&headers)
@@ -219,17 +260,8 @@ fn normalize_target_url(input: &str) -> Result<Url, &'static str> {
     Url::parse(&normalized).map_err(|_| "invalid URL format")
 }
 
-fn validate_target_url(url: &Url) -> Result<(), &'static str> {
-    if !matches!(url.scheme(), "http" | "https") {
-        return Err("only HTTP and HTTPS URLs are supported");
-    }
-
-    let host = url.host_str().unwrap_or_default().to_ascii_lowercase();
-    if host.is_empty() || is_forbidden_hostname(&host) {
-        return Err("access to local or private networks is forbidden");
-    }
-
-    Ok(())
+async fn validate_target_url(url: &Url) -> Result<(), &'static str> {
+    validate_url_safe(url).await
 }
 
 fn proxy_prefix_from_path(path: &str) -> String {
@@ -246,6 +278,135 @@ fn reqwest_method(method: &Method) -> reqwest::Method {
 
 fn method_allows_body(method: &Method) -> bool {
     !matches!(*method, Method::GET | Method::HEAD)
+}
+
+fn is_websocket_request(headers: &HeaderMap) -> bool {
+    headers
+        .get(header::UPGRADE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.eq_ignore_ascii_case("websocket"))
+}
+
+fn websocket_target_url(target_url: &Url) -> Url {
+    let mut url = target_url.clone();
+    let _ = match target_url.scheme() {
+        "https" => url.set_scheme("wss"),
+        _ => url.set_scheme("ws"),
+    };
+    url
+}
+
+async fn websocket_proxy(
+    client_socket: WebSocket,
+    target_url: Url,
+    headers: HeaderMap,
+    cookie_header: Option<String>,
+) {
+    let request = match websocket_upstream_request(&target_url, &headers, cookie_header.as_deref())
+    {
+        Ok(request) => request,
+        Err(err) => {
+            tracing::warn!(target_url = %target_url, error = %err, "failed to build websocket request");
+            return;
+        }
+    };
+    let Ok((upstream_socket, _response)) = connect_async(request).await else {
+        tracing::warn!(target_url = %target_url, "failed to connect websocket upstream");
+        ::metrics::counter!("yundo_proxy_upstream_errors_total", "proxy" => "websocket")
+            .increment(1);
+        return;
+    };
+
+    let (mut client_tx, mut client_rx) = client_socket.split();
+    let (mut upstream_tx, mut upstream_rx) = upstream_socket.split();
+
+    let client_to_upstream = async {
+        while let Some(Ok(message)) = client_rx.next().await {
+            let mapped = match axum_to_tungstenite_message(message) {
+                Some(message) => message,
+                None => break,
+            };
+            if upstream_tx.send(mapped).await.is_err() {
+                break;
+            }
+        }
+    };
+
+    let upstream_to_client = async {
+        while let Some(Ok(message)) = upstream_rx.next().await {
+            let mapped = match tungstenite_to_axum_message(message) {
+                Some(message) => message,
+                None => break,
+            };
+            if client_tx.send(mapped).await.is_err() {
+                break;
+            }
+        }
+    };
+
+    tokio::select! {
+        _ = client_to_upstream => {},
+        _ = upstream_to_client => {},
+    }
+}
+
+fn websocket_upstream_request(
+    target_url: &Url,
+    headers: &HeaderMap,
+    cookie_header: Option<&str>,
+) -> Result<tungstenite::handshake::client::Request, tungstenite::http::Error> {
+    let mut builder = tungstenite::handshake::client::Request::builder().uri(target_url.as_str());
+    for (name, value) in headers {
+        let lower = name.as_str().to_ascii_lowercase();
+        if matches!(
+            lower.as_str(),
+            "host"
+                | "connection"
+                | "upgrade"
+                | "sec-websocket-key"
+                | "sec-websocket-version"
+                | "sec-websocket-extensions"
+                | "cookie"
+        ) {
+            continue;
+        }
+        builder = builder.header(name.as_str(), value.as_bytes());
+    }
+    if let Some(cookie_header) = cookie_header {
+        builder = builder.header(header::COOKIE.as_str(), cookie_header);
+    }
+    builder.body(())
+}
+
+fn axum_to_tungstenite_message(message: AxumWsMessage) -> Option<tungstenite::Message> {
+    match message {
+        AxumWsMessage::Text(value) => Some(tungstenite::Message::Text(value)),
+        AxumWsMessage::Binary(value) => Some(tungstenite::Message::Binary(value)),
+        AxumWsMessage::Ping(value) => Some(tungstenite::Message::Ping(value)),
+        AxumWsMessage::Pong(value) => Some(tungstenite::Message::Pong(value)),
+        AxumWsMessage::Close(frame) => Some(tungstenite::Message::Close(frame.map(|frame| {
+            tungstenite::protocol::CloseFrame {
+                code: tungstenite::protocol::frame::coding::CloseCode::from(frame.code),
+                reason: frame.reason.to_string().into(),
+            }
+        }))),
+    }
+}
+
+fn tungstenite_to_axum_message(message: tungstenite::Message) -> Option<AxumWsMessage> {
+    match message {
+        tungstenite::Message::Text(value) => Some(AxumWsMessage::Text(value)),
+        tungstenite::Message::Binary(value) => Some(AxumWsMessage::Binary(value)),
+        tungstenite::Message::Ping(value) => Some(AxumWsMessage::Ping(value)),
+        tungstenite::Message::Pong(value) => Some(AxumWsMessage::Pong(value)),
+        tungstenite::Message::Close(frame) => Some(AxumWsMessage::Close(frame.map(|frame| {
+            axum::extract::ws::CloseFrame {
+                code: frame.code.into(),
+                reason: frame.reason.to_string().into(),
+            }
+        }))),
+        tungstenite::Message::Frame(_) => None,
+    }
 }
 
 fn upstream_request_headers(headers: &HeaderMap) -> reqwest::header::HeaderMap {
@@ -266,6 +427,21 @@ fn upstream_request_headers(headers: &HeaderMap) -> reqwest::header::HeaderMap {
         ) {
             continue;
         }
+
+        // Rewrite Referer to avoid leaking proxy URL
+        if lower == "referer" {
+            if let Ok(referer_str) = value.to_str() {
+                if let Some(original_url) = extract_original_url_from_referer(referer_str) {
+                    if let Ok(rewritten) = reqwest::header::HeaderValue::from_str(&original_url) {
+                        result.insert(reqwest::header::REFERER, rewritten);
+                        continue;
+                    }
+                }
+            }
+            // If we can't rewrite, skip the Referer header entirely to avoid leaking
+            continue;
+        }
+
         if let Ok(header_name) = reqwest::header::HeaderName::from_bytes(name.as_str().as_bytes()) {
             result.insert(header_name, value.clone());
         }
@@ -277,6 +453,20 @@ fn upstream_request_headers(headers: &HeaderMap) -> reqwest::header::HeaderMap {
         );
     }
     result
+}
+
+/// Extract original URL from a proxied referer
+fn extract_original_url_from_referer(referer: &str) -> Option<String> {
+    // Check if this is a proxied URL: /browse/{encoded_url}
+    if let Some(encoded_part) = referer.split("/browse/").nth(1) {
+        // Extract just the encoded URL part (before any query string)
+        let encoded_url = encoded_part.split('?').next()?;
+        // Decode the URL
+        if let Ok(decoded) = percent_decode(encoded_url) {
+            return Some(decoded);
+        }
+    }
+    None
 }
 
 fn response_headers(headers: &reqwest::header::HeaderMap, rewritten: bool) -> HeaderMap {
@@ -305,6 +495,42 @@ fn response_headers(headers: &reqwest::header::HeaderMap, rewritten: bool) -> He
             result.insert(header_name, value.clone());
         }
     }
+
+    // Add security headers for proxied content
+    if rewritten {
+        // CSP: Allow inline scripts/styles (needed for rewriting), but restrict other sources
+        result.insert(
+            header::CONTENT_SECURITY_POLICY,
+            HeaderValue::from_static(
+                "default-src 'self' http: https: data: blob: 'unsafe-inline' 'unsafe-eval'; \
+                 connect-src 'self' http: https: ws: wss: data: blob:; \
+                 img-src 'self' http: https: data: blob:; \
+                 media-src 'self' http: https: data: blob:; \
+                 font-src 'self' http: https: data:; \
+                 frame-ancestors 'self'; \
+                 base-uri 'self'",
+            ),
+        );
+
+        // Prevent clickjacking
+        result.insert(
+            HeaderName::from_static("x-frame-options"),
+            HeaderValue::from_static("SAMEORIGIN"),
+        );
+
+        // Prevent MIME sniffing
+        result.insert(
+            HeaderName::from_static("x-content-type-options"),
+            HeaderValue::from_static("nosniff"),
+        );
+
+        // Referrer policy
+        result.insert(
+            HeaderName::from_static("referrer-policy"),
+            HeaderValue::from_static("no-referrer-when-downgrade"),
+        );
+    }
+
     result
 }
 
@@ -395,15 +621,48 @@ fn decode_text_response(bytes: &[u8], content_type: &str, kind: RewriteKind) -> 
     decoded.into_owned()
 }
 
-fn decompress_text_bytes(bytes: Bytes, content_encoding: &str) -> Bytes {
+fn decompress_text_bytes(
+    bytes: Bytes,
+    content_encoding: &str,
+) -> Result<Bytes, (StatusCode, String)> {
     let lower = content_encoding.to_ascii_lowercase();
-    if lower.contains("gzip") || bytes.starts_with(&[0x1f, 0x8b]) {
-        return decompress_with(GzDecoder::new(bytes.as_ref())).unwrap_or(bytes);
+    let decompressed = if lower.contains("gzip") || bytes.starts_with(&[0x1f, 0x8b]) {
+        match decompress_with(GzDecoder::new(bytes.as_ref())) {
+            Ok(decompressed) => decompressed,
+            Err(e) => {
+                tracing::warn!("Failed to decompress gzip content: {}", e);
+                bytes
+            }
+        }
+    } else if lower.contains("deflate") {
+        match decompress_with(ZlibDecoder::new(bytes.as_ref())) {
+            Ok(decompressed) => decompressed,
+            Err(e) => {
+                tracing::warn!("Failed to decompress deflate content: {}", e);
+                bytes
+            }
+        }
+    } else {
+        bytes
+    };
+
+    if decompressed.len() > MAX_DECOMPRESSED_REWRITE_BYTES {
+        tracing::warn!(
+            size = decompressed.len(),
+            limit = MAX_DECOMPRESSED_REWRITE_BYTES,
+            "Decompressed response too large for web proxy rewriting"
+        );
+        return Err((
+            StatusCode::PAYLOAD_TOO_LARGE,
+            format!(
+                "Decompressed response size ({:.1}MB) exceeds the {}MB limit for web proxy rewriting.",
+                decompressed.len() as f64 / 1024.0 / 1024.0,
+                MAX_DECOMPRESSED_REWRITE_BYTES / 1024 / 1024
+            ),
+        ));
     }
-    if lower.contains("deflate") {
-        return decompress_with(ZlibDecoder::new(bytes.as_ref())).unwrap_or(bytes);
-    }
-    bytes
+
+    Ok(decompressed)
 }
 
 fn decompress_with<R: Read>(mut reader: R) -> Result<Bytes, std::io::Error> {
@@ -429,7 +688,7 @@ fn charset_from_content_type(content_type: &str) -> Option<String> {
 }
 
 fn charset_from_html_meta(bytes: &[u8]) -> Option<String> {
-    let preview_len = bytes.len().min(4096);
+    let preview_len = bytes.len().min(CHARSET_DETECTION_BYTES);
     let preview = String::from_utf8_lossy(&bytes[..preview_len]).to_ascii_lowercase();
     if let Some(index) = preview.find("charset=") {
         let after = &preview[index + "charset=".len()..];
@@ -529,7 +788,75 @@ fn rewrite_single_tag_attrs(tag: &str, base: &Url, proxy_prefix: &str) -> String
     }
     output = rewrite_attr_urls(&output, "srcset", base, proxy_prefix, true);
     output = rewrite_attr_urls(&output, "imagesrcset", base, proxy_prefix, true);
+    output = rewrite_style_attr_urls(&output, base, proxy_prefix);
+    output = rewrite_meta_refresh(&output, base, proxy_prefix);
     remove_integrity_attrs(&output)
+}
+
+fn rewrite_style_attr_urls(tag: &str, base: &Url, proxy_prefix: &str) -> String {
+    rewrite_attr_value(tag, "style", |value| rewrite_css(value, base, proxy_prefix))
+}
+
+fn rewrite_meta_refresh(tag: &str, base: &Url, proxy_prefix: &str) -> String {
+    if !tag
+        .get(..5)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("<meta"))
+        || !find_attr_value(tag, "http-equiv")
+            .is_some_and(|value| value.eq_ignore_ascii_case("refresh"))
+    {
+        return tag.to_string();
+    }
+
+    rewrite_attr_value(tag, "content", |value| {
+        let Some(index) = find_case_insensitive(value, "url=") else {
+            return value.to_string();
+        };
+        let url_start = index + "url=".len();
+        let rewritten = rewrite_url_value(value[url_start..].trim(), base, proxy_prefix);
+        format!("{}url={}", &value[..index], rewritten)
+    })
+}
+
+fn rewrite_attr_value<F>(tag: &str, attr: &str, replace: F) -> String
+where
+    F: Fn(&str) -> String,
+{
+    let pattern = format!("{attr}=");
+    let Some(index) = find_case_insensitive(tag, &pattern) else {
+        return tag.to_string();
+    };
+
+    let value_start = index + pattern.len();
+    let Some(quote) = tag[value_start..]
+        .chars()
+        .next()
+        .filter(|ch| *ch == '"' || *ch == '\'')
+    else {
+        return tag.to_string();
+    };
+    let inner_start = value_start + quote.len_utf8();
+    let Some(relative_end) = tag[inner_start..].find(quote) else {
+        return tag.to_string();
+    };
+    let inner_end = inner_start + relative_end;
+    let mut output = String::with_capacity(tag.len());
+    output.push_str(&tag[..inner_start]);
+    output.push_str(&replace(&tag[inner_start..inner_end]));
+    output.push_str(&tag[inner_end..]);
+    output
+}
+
+fn find_attr_value<'a>(tag: &'a str, attr: &str) -> Option<&'a str> {
+    let pattern = format!("{attr}=");
+    let index = find_case_insensitive(tag, &pattern)?;
+    let value_start = index + pattern.len();
+    let quote = tag[value_start..]
+        .chars()
+        .next()
+        .filter(|ch| *ch == '"' || *ch == '\'')?;
+    let inner_start = value_start + quote.len_utf8();
+    let relative_end = tag[inner_start..].find(quote)?;
+    Some(&tag[inner_start..inner_start + relative_end])
 }
 
 fn is_opening_tag(tag: &str, name: &str) -> bool {
@@ -881,12 +1208,7 @@ fn rewrite_url_value(value: &str, base: &Url, proxy_prefix: &str) -> String {
     }
 }
 
-fn inject_runtime(
-    html: &str,
-    base: &Url,
-    proxy_prefix: &str,
-    expose_target_path: bool,
-) -> String {
+fn inject_runtime(html: &str, base: &Url, proxy_prefix: &str, expose_target_path: bool) -> String {
     let runtime = runtime_script(base, proxy_prefix, expose_target_path);
     if let Some(index) = find_case_insensitive(html, "<head>") {
         let mut output = String::with_capacity(html.len() + runtime.len());
@@ -927,6 +1249,8 @@ fn runtime_script(base: &Url, proxy_prefix: &str, expose_target_path: bool) -> S
       if (url.origin === window.location.origin && (url.pathname === prefixPath || url.pathname.startsWith(prefixPath + '/'))) {{
         return value;
       }}
+      if (url.protocol === 'ws:') url.protocol = 'http:';
+      if (url.protocol === 'wss:') url.protocol = 'https:';
       return prefixPath + '/' + encodeURIComponent(url.href);
     }} catch (_) {{
       return input;
@@ -966,6 +1290,13 @@ fn runtime_script(base: &Url, proxy_prefix: &str, expose_target_path: bool) -> S
       if (element.hasAttribute && element.hasAttribute(attr)) {{
         element.setAttribute(attr, proxiedSrcset(element.getAttribute(attr)));
       }}
+    }}
+    if (element.hasAttribute && element.hasAttribute('style')) {{
+      element.setAttribute('style', String(element.getAttribute('style')).replace(/url\(([^)]+)\)/gi, function(match, raw) {{
+        const quote = raw.trim().charAt(0);
+        const unquoted = (quote === '"' || quote === "'") ? raw.trim().slice(1, -1) : raw.trim();
+        return 'url(' + proxied(unquoted) + ')';
+      }}));
     }}
     return element;
   }}
@@ -1029,6 +1360,49 @@ fn runtime_script(base: &Url, proxy_prefix: &str, expose_target_path: bool) -> S
     return originalFetch(proxied(input), init);
   }};
 
+  const OriginalWebSocket = window.WebSocket;
+  if (OriginalWebSocket) {{
+    window.WebSocket = function(url, protocols) {{
+      return protocols === undefined ? new OriginalWebSocket(proxied(url)) : new OriginalWebSocket(proxied(url), protocols);
+    }};
+    window.WebSocket.prototype = OriginalWebSocket.prototype;
+    Object.defineProperty(window.WebSocket, 'OPEN', {{ value: OriginalWebSocket.OPEN }});
+    Object.defineProperty(window.WebSocket, 'CONNECTING', {{ value: OriginalWebSocket.CONNECTING }});
+    Object.defineProperty(window.WebSocket, 'CLOSING', {{ value: OriginalWebSocket.CLOSING }});
+    Object.defineProperty(window.WebSocket, 'CLOSED', {{ value: OriginalWebSocket.CLOSED }});
+  }}
+
+  const OriginalEventSource = window.EventSource;
+  if (OriginalEventSource) {{
+    window.EventSource = function(url, config) {{
+      return new OriginalEventSource(proxied(url), config);
+    }};
+    window.EventSource.prototype = OriginalEventSource.prototype;
+  }}
+
+  const OriginalWorker = window.Worker;
+  if (OriginalWorker) {{
+    window.Worker = function(url, options) {{
+      return new OriginalWorker(proxied(url), options);
+    }};
+    window.Worker.prototype = OriginalWorker.prototype;
+  }}
+
+  const OriginalSharedWorker = window.SharedWorker;
+  if (OriginalSharedWorker) {{
+    window.SharedWorker = function(url, options) {{
+      return new OriginalSharedWorker(proxied(url), options);
+    }};
+    window.SharedWorker.prototype = OriginalSharedWorker.prototype;
+  }}
+
+  if (navigator.sendBeacon) {{
+    const originalSendBeacon = navigator.sendBeacon.bind(navigator);
+    navigator.sendBeacon = function(url, data) {{
+      return originalSendBeacon(proxied(url), data);
+    }};
+  }}
+
   if (navigator.serviceWorker && navigator.serviceWorker.register) {{
     const blockedServiceWorkerRegistration = function() {{
       return Promise.reject(new DOMException('Service workers are disabled inside the yundo web proxy.', 'SecurityError'));
@@ -1054,6 +1428,14 @@ fn runtime_script(base: &Url, proxy_prefix: &str, expose_target_path: bool) -> S
   window.open = function(url, target, features) {{
     return originalWindowOpen.call(window, proxied(url), target, features);
   }};
+
+  try {{
+    const locationProto = Location.prototype;
+    const originalAssign = locationProto.assign;
+    const originalReplace = locationProto.replace;
+    locationProto.assign = function(url) {{ return originalAssign.call(this, proxied(url)); }};
+    locationProto.replace = function(url) {{ return originalReplace.call(this, proxied(url)); }};
+  }} catch (_) {{}}
 
   const originalPushState = history.pushState;
   let activePushState = originalPushState;
@@ -1211,8 +1593,6 @@ fn cloudflare_verification_landing(target_url: &Url) -> HtmlResponse<String> {
       main {{ width: min(90vw, 480px); padding: 32px; background: #fff; border-radius: 16px; box-shadow: 0 8px 32px rgba(0,0,0,0.05); text-align: center; }}
       h1 {{ font-size: 24px; margin: 0 0 16px; color: #0058bb; }}
       p {{ line-height: 1.6; color: #424753; margin: 0 0 24px; }}
-      .btn {{ display: inline-block; padding: 12px 24px; background: #0058bb; color: #fff; text-decoration: none; border-radius: 8px; font-weight: 600; transition: opacity 0.2s; }}
-      .btn:hover {{ opacity: 0.9; }}
       .footer {{ margin-top: 24px; font-size: 13px; color: #8e95a3; }}
     </style>
   </head>
@@ -1220,14 +1600,12 @@ fn cloudflare_verification_landing(target_url: &Url) -> HtmlResponse<String> {
     <main>
       <h1>安全验证</h1>
       <p>目标网站 (<code>{host}</code>) 开启了 Cloudflare 防护或人机验证。由于技术限制，验证过程无法在代理中完成。</p>
-      <p>请点击下方按钮直接前往原站完成验证。验证成功后，您可以关闭页面并返回代理继续浏览。</p>
-      <a href="{url}" class="btn" target="_blank" rel="noopener noreferrer">前往原站验证</a>
-      <div class="footer">验证成功后，原站会在您的浏览器中存储 Cookie，随后代理请求将能正常通过。</div>
+      <p>当前页面无法通过 Yundo 网页代理访问。请更换目标网页，或在浏览器中直接访问原网站。</p>
+      <div class="footer">Cloudflare 验证状态无法从原网站同步到代理会话。</div>
     </main>
   </body>
 </html>"#,
-        host = target_url.host_str().unwrap_or(""),
-        url = target_url.as_str()
+        host = target_url.host_str().unwrap_or("")
     ))
 }
 
@@ -1255,54 +1633,30 @@ fn session_id_from_headers(headers: &HeaderMap) -> Option<String> {
 }
 
 fn new_session_id() -> String {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .unwrap_or_default();
-    format!("{nanos:x}")
+    uuid::Uuid::new_v4().simple().to_string()
 }
 
-fn cookie_scope(session_id: &str, url: &Url) -> String {
-    let host = url.host_str().unwrap_or_default();
-    let port = url
-        .port()
-        .map(|port| format!(":{port}"))
-        .unwrap_or_default();
-    format!("{session_id}|{}://{}{}", url.scheme(), host, port)
+fn cookie_scope(session_id: &str, _url: &Url) -> String {
+    format!("{session_id}|jar")
 }
 
 async fn upstream_cookie_header(
     state: &AppState,
     scope: &str,
     request_headers: &HeaderMap,
+    target_url: &Url,
 ) -> Option<String> {
     let mut merged = HashMap::new();
 
     let mut cookies = state.web_cookies.lock().await;
-    if let Some(scoped) = cookies.get(scope) {
-        for (name, value) in scoped {
-            merged.insert(name.clone(), value.clone());
+    if let Some(jar) = cookies.get(scope) {
+        for cookie in jar.iter().filter(|cookie| cookie.matches(target_url)) {
+            merged.insert(cookie.name.clone(), cookie.value.clone());
         }
     }
     drop(cookies);
 
-    if let Some(browser_cookie) = request_headers
-        .get(header::COOKIE)
-        .and_then(|value| value.to_str().ok())
-    {
-        for part in browser_cookie.split(';') {
-            let Some((name, value)) = part.trim().split_once('=') else {
-                continue;
-            };
-            let name = name.trim();
-            if is_internal_proxy_cookie(name) || name.is_empty() {
-                continue;
-            }
-            merged
-                .entry(name.to_string())
-                .or_insert_with(|| value.trim().to_string());
-        }
-    }
+    merge_internal_browser_cookie(&mut merged, request_headers);
 
     if merged.is_empty() {
         return None;
@@ -1324,6 +1678,7 @@ fn is_internal_proxy_cookie(name: &str) -> bool {
 async fn persist_upstream_cookies(
     state: &AppState,
     scope: &str,
+    target_url: &Url,
     headers: &reqwest::header::HeaderMap,
 ) {
     let set_cookies = headers.get_all(reqwest::header::SET_COOKIE);
@@ -1332,15 +1687,8 @@ async fn persist_upstream_cookies(
         let Ok(value) = value.to_str() else {
             continue;
         };
-        let Some(first) = value.split(';').next() else {
-            continue;
-        };
-        let Some((name, cookie_value)) = first.split_once('=') else {
-            continue;
-        };
-        let name = name.trim();
-        if !name.is_empty() {
-            parsed.push((name.to_string(), cookie_value.trim().to_string()));
+        if let Some(cookie) = parse_set_cookie(value, target_url) {
+            parsed.push(cookie);
         }
     }
 
@@ -1350,17 +1698,149 @@ async fn persist_upstream_cookies(
 
     let mut cookies = state.web_cookies.lock().await;
 
-    // Get or create the HashMap for this scope
-    if let Some(scoped) = cookies.get_mut(scope) {
-        for (name, value) in parsed {
-            scoped.insert(name, value);
+    if let Some(jar) = cookies.get_mut(scope) {
+        for cookie in parsed {
+            upsert_cookie(jar, cookie);
         }
     } else {
-        let mut new_map = HashMap::new();
-        for (name, value) in parsed {
-            new_map.insert(name, value);
+        let mut jar = Vec::new();
+        for cookie in parsed {
+            upsert_cookie(&mut jar, cookie);
         }
-        cookies.put(scope.to_string(), new_map);
+        cookies.put(scope.to_string(), jar);
+    }
+}
+
+impl WebCookie {
+    fn matches(&self, url: &Url) -> bool {
+        if self.secure && url.scheme() != "https" {
+            return false;
+        }
+        let host = url.host_str().unwrap_or_default().to_ascii_lowercase();
+        let path = url.path();
+        let domain_matches = if self.host_only {
+            host == self.domain
+        } else {
+            host == self.domain || host.ends_with(&format!(".{}", self.domain))
+        };
+        domain_matches && path.starts_with(&self.path)
+    }
+}
+
+fn merge_internal_browser_cookie(
+    merged: &mut HashMap<String, String>,
+    request_headers: &HeaderMap,
+) {
+    let Some(browser_cookie) = request_headers
+        .get(header::COOKIE)
+        .and_then(|value| value.to_str().ok())
+    else {
+        return;
+    };
+
+    for part in browser_cookie.split(';') {
+        let Some((name, value)) = part.trim().split_once('=') else {
+            continue;
+        };
+        let name = name.trim();
+        if is_internal_proxy_cookie(name) || name.is_empty() {
+            continue;
+        }
+        if name.starts_with("__YUNDO_TARGET_") {
+            merged
+                .entry(name.trim_start_matches("__YUNDO_TARGET_").to_string())
+                .or_insert_with(|| value.trim().to_string());
+        }
+    }
+}
+
+fn parse_set_cookie(header_value: &str, target_url: &Url) -> Option<WebCookie> {
+    let mut parts = header_value.split(';');
+    let (name, value) = parts.next()?.trim().split_once('=')?;
+    let name = name.trim();
+    if name.is_empty() || is_internal_proxy_cookie(name) {
+        return None;
+    }
+
+    let request_host = target_url.host_str()?.to_ascii_lowercase();
+    let mut domain = request_host.clone();
+    let mut host_only = true;
+    let mut path = default_cookie_path(target_url);
+    let mut secure = false;
+    let mut expired = false;
+
+    for part in parts {
+        let trimmed = part.trim();
+        let (attr, attr_value) = trimmed.split_once('=').unwrap_or((trimmed, ""));
+        match attr.trim().to_ascii_lowercase().as_str() {
+            "domain" => {
+                let candidate = attr_value
+                    .trim()
+                    .trim_start_matches('.')
+                    .to_ascii_lowercase();
+                if !candidate.is_empty()
+                    && (request_host == candidate
+                        || request_host.ends_with(&format!(".{candidate}")))
+                {
+                    domain = candidate;
+                    host_only = false;
+                }
+            }
+            "path" => {
+                let candidate = attr_value.trim();
+                if candidate.starts_with('/') {
+                    path = candidate.to_string();
+                }
+            }
+            "secure" => secure = true,
+            "max-age" => {
+                if attr_value.trim().parse::<i64>().is_ok_and(|age| age <= 0) {
+                    expired = true;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    Some(WebCookie {
+        name: name.to_string(),
+        value: if expired {
+            String::new()
+        } else {
+            value.trim().to_string()
+        },
+        domain,
+        path,
+        secure,
+        host_only,
+    })
+}
+
+fn default_cookie_path(url: &Url) -> String {
+    let path = url.path();
+    if !path.starts_with('/') || path == "/" {
+        return "/".to_string();
+    }
+    match path.rfind('/') {
+        Some(0) | None => "/".to_string(),
+        Some(index) => path[..index].to_string(),
+    }
+}
+
+fn upsert_cookie(jar: &mut Vec<WebCookie>, cookie: WebCookie) {
+    if let Some(index) = jar.iter().position(|existing| {
+        existing.name == cookie.name
+            && existing.domain == cookie.domain
+            && existing.path == cookie.path
+            && existing.host_only == cookie.host_only
+    }) {
+        if cookie.value.is_empty() {
+            jar.remove(index);
+        } else {
+            jar[index] = cookie;
+        }
+    } else if !cookie.value.is_empty() {
+        jar.push(cookie);
     }
 }
 
@@ -1437,7 +1917,10 @@ mod tests {
     fn non_document_html_response_is_not_injected() {
         let base = Url::parse("https://verify.example.test/captcha/get").unwrap();
         let mut headers = HeaderMap::new();
-        headers.insert(header::REFERER, HeaderValue::from_static("http://127.0.0.1/browse/"));
+        headers.insert(
+            header::REFERER,
+            HeaderValue::from_static("http://127.0.0.1/browse/"),
+        );
         let kind = effective_rewrite_kind(RewriteKind::Html, &headers);
 
         let rewritten = rewrite_text_response(
@@ -1506,9 +1989,7 @@ mod tests {
 
     #[test]
     fn detects_douyin_hosts() {
-        assert!(is_douyin_host(
-            &Url::parse("https://douyin.com/").unwrap()
-        ));
+        assert!(is_douyin_host(&Url::parse("https://douyin.com/").unwrap()));
         assert!(is_douyin_host(
             &Url::parse("https://www.douyin.com/").unwrap()
         ));
@@ -1687,5 +2168,127 @@ mod tests {
             normalized.contains(r#"content="text/html; charset=utf-8" http-equiv="Content-Type""#)
         );
         assert!(!normalized.contains(r#"charset=utf-8 http-equiv="Content-Type"#));
+    }
+
+    #[tokio::test]
+    async fn validates_resolved_private_targets() {
+        let target = Url::parse("http://127.0.0.1/").unwrap();
+
+        assert!(validate_target_url(&target).await.is_err());
+    }
+
+    #[test]
+    fn session_ids_are_random_uuid_tokens() {
+        let first = new_session_id();
+        let second = new_session_id();
+
+        assert_eq!(first.len(), 32);
+        assert_ne!(first, second);
+        assert!(first.chars().all(|ch| ch.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn cookies_respect_domain_path_and_secure_scope() {
+        let source = Url::parse("https://app.example.com/account/login").unwrap();
+        let cookie = parse_set_cookie(
+            "sid=abc; Domain=.example.com; Path=/account; Secure; HttpOnly",
+            &source,
+        )
+        .unwrap();
+
+        assert!(cookie.matches(&Url::parse("https://app.example.com/account/profile").unwrap()));
+        assert!(cookie.matches(&Url::parse("https://www.example.com/account/profile").unwrap()));
+        assert!(!cookie.matches(&Url::parse("http://www.example.com/account/profile").unwrap()));
+        assert!(!cookie.matches(&Url::parse("https://www.example.com/public").unwrap()));
+        assert!(!cookie.matches(&Url::parse("https://evil-example.com/account").unwrap()));
+    }
+
+    #[test]
+    fn host_only_cookies_do_not_leak_to_subdomains() {
+        let source = Url::parse("https://example.com/path/page").unwrap();
+        let cookie = parse_set_cookie("sid=abc; Path=/path", &source).unwrap();
+
+        assert!(cookie.matches(&Url::parse("https://example.com/path/next").unwrap()));
+        assert!(!cookie.matches(&Url::parse("https://sub.example.com/path/next").unwrap()));
+    }
+
+    #[test]
+    fn expired_cookies_remove_existing_entries() {
+        let source = Url::parse("https://example.com/path/page").unwrap();
+        let mut jar = vec![parse_set_cookie("sid=abc; Path=/path", &source).unwrap()];
+        let expired = parse_set_cookie("sid=gone; Path=/path; Max-Age=0", &source).unwrap();
+
+        upsert_cookie(&mut jar, expired);
+
+        assert!(jar.is_empty());
+    }
+
+    #[test]
+    fn rewrites_style_attributes_and_meta_refresh() {
+        let base = Url::parse("https://example.com/dir/page.html").unwrap();
+        let html = r#"<html><head><meta http-equiv="refresh" content="0; url=/next"></head><body><div style="background:url('../img/a.png')"></div></body></html>"#;
+
+        let rewritten = rewrite_html(html, &base, "/browse", false);
+
+        assert!(rewritten.contains("/browse/https%3A%2F%2Fexample.com%2Fnext"));
+        assert!(rewritten.contains("/browse/https%3A%2F%2Fexample.com%2Fimg%2Fa.png"));
+    }
+
+    #[test]
+    fn runtime_rewrites_realtime_and_worker_apis() {
+        let runtime = runtime_script(
+            &Url::parse("https://example.com/").unwrap(),
+            "/browse",
+            false,
+        );
+
+        assert!(runtime.contains("window.WebSocket"));
+        assert!(runtime.contains("window.EventSource"));
+        assert!(runtime.contains("navigator.sendBeacon"));
+        assert!(runtime.contains("window.Worker"));
+        assert!(runtime.contains("Location.prototype"));
+        assert!(runtime.contains("url.protocol === 'wss:'"));
+    }
+
+    #[test]
+    fn websocket_upstream_request_forwards_cookie_and_protocol() {
+        let target = Url::parse("wss://example.com/socket").unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "sec-websocket-protocol",
+            HeaderValue::from_static("graphql-transport-ws"),
+        );
+
+        let request = websocket_upstream_request(&target, &headers, Some("sid=abc")).unwrap();
+
+        assert_eq!(request.uri(), "wss://example.com/socket");
+        assert_eq!(
+            request.headers().get("cookie").unwrap().to_str().unwrap(),
+            "sid=abc"
+        );
+        assert_eq!(
+            request
+                .headers()
+                .get("sec-websocket-protocol")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "graphql-transport-ws"
+        );
+    }
+
+    #[tokio::test]
+    async fn cloudflare_landing_reports_proxy_access_blocked() {
+        let target = Url::parse("https://protected.example/").unwrap();
+        let response = cloudflare_verification_landing(&target).into_response();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        let html = String::from_utf8(body.to_vec()).unwrap();
+
+        assert!(html.contains("无法通过 Yundo 网页代理访问"));
+        assert!(html.contains("验证状态无法从原网站同步到代理会话"));
+        assert!(!html.contains("前往原站验证"));
+        assert!(!html.contains("验证成功后"));
     }
 }
