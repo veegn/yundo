@@ -152,8 +152,8 @@ export default function Layout() {
           <div className="flex flex-col items-center md:items-end gap-4">
             <div className="flex items-center gap-6">
               <a href="https://github.com/veegn/yundo" className="text-sm font-medium text-on-surface-variant hover:text-primary transition-colors">{t('footer.github')}</a>
-              <a href="#" className="text-sm font-medium text-on-surface-variant hover:text-primary transition-colors">{t('footer.privacy')}</a>
-              <a href="#" className="text-sm font-medium text-on-surface-variant hover:text-primary transition-colors">{t('footer.terms')}</a>
+              <Link to="/privacy" className="text-sm font-medium text-on-surface-variant hover:text-primary transition-colors">{t('footer.privacy')}</Link>
+              <Link to="/terms" className="text-sm font-medium text-on-surface-variant hover:text-primary transition-colors">{t('footer.terms')}</Link>
             </div>
             <span className="text-xs text-on-surface-variant/60 tracking-wider font-mono">
               {t('footer.copyright', { year: currentYear })}
