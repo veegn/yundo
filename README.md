@@ -60,7 +60,7 @@ cargo run -- \
   --port 8080 \
   --cache-dir ./cache \
   --cache-size 1GiB \
-  --max-file-size 500MB \
+  --max-file-size 0 \
   --filebox-size 5GB \
   --api-key your-secret-key \
   --base-path / \
@@ -75,7 +75,7 @@ cargo run -- \
 | `--cache-dir` | 数据存储目录（缓存、数据库、文件箱） | `./cache` |
 | `--host` | 绑定主机地址 | `0.0.0.0` |
 | `--port` | 监听端口 | `8080` |
-| `--max-file-size` | 下载代理允许的最大文件大小 | `500MB` |
+| `--max-file-size` | 下载代理允许的最大文件大小 | `0` (不限制) |
 | `--filebox-size` | 文件箱总容量上限 | `5GB` |
 | `--api-key` | 启用 API Key 认证（Header: `X-API-Key`） | 无 |
 | `--rate-limit-per-minute` | 每分钟请求速率限制 | `60` |

@@ -20,8 +20,8 @@ pub const TEMP_CHUNK_MAX_AGE_SECS: u64 = 86400;
 /// Maximum size for web proxy text rewriting (10 MB)
 pub const MAX_REWRITE_BYTES: usize = 10 * 1024 * 1024;
 
-/// Default maximum file size (500 MB)
-pub const DEFAULT_MAX_FILE_SIZE: u64 = 500 * 1024 * 1024;
+/// Default maximum file size (0 = unlimited)
+pub const DEFAULT_MAX_FILE_SIZE: u64 = 0;
 
 /// Channel buffer size for streaming responses
 pub const STREAM_CHANNEL_BUFFER: usize = 16;

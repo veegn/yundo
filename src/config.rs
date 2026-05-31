@@ -26,7 +26,7 @@ pub struct Args {
     #[arg(long, default_value = "/", value_parser = normalize_base_path)]
     pub base_path: String,
 
-    #[arg(long, default_value = "500MB", value_parser = parse_cache_size)]
+    #[arg(long, default_value = "0", value_parser = parse_cache_size)]
     pub max_file_size: u64,
 
     #[arg(long)]

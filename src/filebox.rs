@@ -192,7 +192,7 @@ pub async fn remote_upload_filebox_handler(
                 let chunk_size = chunk.len() as u64;
 
                 // Check file size limit
-                if size + chunk_size > state.max_file_size {
+                if state.max_file_size > 0 && size + chunk_size > state.max_file_size {
                     quota_exceeded = true;
                     break;
                 }
@@ -340,7 +340,7 @@ pub async fn upload_filebox_handler(
             let chunk_size = chunk.len() as u64;
 
             // Check file size limit
-            if size + chunk_size > state.max_file_size {
+            if state.max_file_size > 0 && size + chunk_size > state.max_file_size {
                 quota_exceeded = true;
                 break;
             }

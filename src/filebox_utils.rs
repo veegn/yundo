@@ -31,7 +31,7 @@ pub fn release_space(state: &AppState, bytes: u64) {
 
 /// Check if a file size is within the allowed limit.
 pub fn check_file_size_limit(state: &AppState, size: u64) -> Result<(), &'static str> {
-    if size > state.max_file_size {
+    if state.max_file_size > 0 && size > state.max_file_size {
         return Err("File size exceeds maximum allowed size");
     }
     Ok(())
