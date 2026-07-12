@@ -19,7 +19,7 @@ export default function Terms() {
         {locale === 'zh' ? (
           <article className="prose prose-slate max-w-none">
             <h1 className="text-3xl font-bold text-on-surface mb-8">使用条款</h1>
-            <p className="text-on-surface-variant mb-6">最后更新日期：2026年5月31日</p>
+            <p className="text-on-surface-variant mb-6">最后更新日期：2026年7月12日</p>
             
             <section className="mb-8">
               <h2 className="text-xl font-bold text-on-surface mb-4">1. 软件许可</h2>
@@ -31,7 +31,7 @@ export default function Terms() {
             <section className="mb-8">
               <h2 className="text-xl font-bold text-on-surface mb-4">2. 合规使用</h2>
               <p className="text-on-surface-variant">
-                您在使用 Yundo 的代理功能、网页浏览或文件上传服务时，必须遵守您所在地区及目标资源托管地区的法律法规。严禁使用本工具从事非法下载、侵犯版权、网络攻击、传播有害信息或其他违反法律的行为。
+                您在使用 Yundo 的下载代理或文件上传服务时，必须遵守您所在地区及目标资源托管地区的法律法规。严禁使用本工具从事非法下载、侵犯版权、网络攻击、传播有害信息或其他违反法律的行为。
               </p>
             </section>
 
@@ -45,7 +45,7 @@ export default function Terms() {
             <section className="mb-8">
               <h2 className="text-xl font-bold text-on-surface mb-4">4. 代理与缓存内容</h2>
               <p className="text-on-surface-variant">
-                Yundo 仅作为中转工具，其缓存的文件和代理访问的网页内容完全由用户请求的行为决定。用户应对其通过本软件获取和存储的所有内容承担全部责任。
+                Yundo 仅作为中转工具，其缓存和中转的文件完全由用户请求的行为决定。用户应对其通过本软件获取和存储的所有内容承担全部责任。
               </p>
             </section>
 
@@ -59,7 +59,7 @@ export default function Terms() {
         ) : (
           <article className="prose prose-slate max-w-none">
             <h1 className="text-3xl font-bold text-on-surface mb-8">Terms of Use</h1>
-            <p className="text-on-surface-variant mb-6">Last Updated: May 31, 2026</p>
+            <p className="text-on-surface-variant mb-6">Last Updated: July 12, 2026</p>
             
             <section className="mb-8">
               <h2 className="text-xl font-bold text-on-surface mb-4">1. Software License</h2>
@@ -71,7 +71,7 @@ export default function Terms() {
             <section className="mb-8">
               <h2 className="text-xl font-bold text-on-surface mb-4">2. Compliance and Acceptable Use</h2>
               <p className="text-on-surface-variant">
-                When using Yundo's proxy, web browsing, or file upload services, you must comply with the laws of your local jurisdiction and the jurisdiction where target resources are hosted. Using this tool for illegal downloads, copyright infringement, cyberattacks, spreading harmful information, or any other illegal activities is strictly prohibited.
+                When using Yundo's download proxy or file upload services, you must comply with the laws of your local jurisdiction and the jurisdiction where target resources are hosted. Using this tool for illegal downloads, copyright infringement, cyberattacks, spreading harmful information, or any other illegal activities is strictly prohibited.
               </p>
             </section>
 
@@ -85,7 +85,7 @@ export default function Terms() {
             <section className="mb-8">
               <h2 className="text-xl font-bold text-on-surface mb-4">4. Proxy and Cached Content</h2>
               <p className="text-on-surface-variant">
-                Yundo acts solely as a transit tool. The cached files and proxied web content are determined entirely by user requests. Users assume full responsibility for all content accessed or stored via the software.
+                Yundo acts solely as a transit tool. Cached and transferred files are determined entirely by user requests. Users assume full responsibility for all content accessed or stored via the software.
               </p>
             </section>
 

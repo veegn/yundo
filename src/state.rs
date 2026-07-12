@@ -1,4 +1,3 @@
-use lru::LruCache;
 use metrics_exporter_prometheus::PrometheusHandle;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -85,7 +84,6 @@ impl CacheUsageTracker {
 /// Shared application state injected into every Axum handler.
 pub struct AppState {
     pub client: Client,
-    pub web_client: Client,
     pub cache_dir: PathBuf,
     pub max_cache_size: u64,
     pub max_file_size: u64,
@@ -93,7 +91,6 @@ pub struct AppState {
     pub db: SqlitePool,
     pub frontend_dist: PathBuf,
     pub base_path: String,
-    pub web_cookies: Mutex<LruCache<String, Vec<crate::web_proxy::WebCookie>>>,
     pub cache_usage: Arc<CacheUsageTracker>,
     pub api_key: Option<String>,
     pub metrics_handle: Option<PrometheusHandle>,

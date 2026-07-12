@@ -5,17 +5,14 @@ use axum::{
     routing::get,
     Router,
 };
-use lru::LruCache;
 use precision_proxy::{
     app::build_router,
     common::{initialize_cache_dir, initialize_database, parse_cache_size, AppState},
-    constants::MAX_WEB_COOKIE_SESSIONS,
     state::CacheUsageTracker,
 };
 use reqwest::Client;
 use std::{
     net::SocketAddr,
-    num::NonZeroUsize,
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicUsize, Ordering},
@@ -24,7 +21,7 @@ use std::{
     time::Duration,
 };
 use tempfile::TempDir;
-use tokio::{fs, net::TcpListener, sync::Mutex, time::sleep};
+use tokio::{fs, net::TcpListener, time::sleep};
 use url::Url;
 
 #[tokio::test]
@@ -164,34 +161,6 @@ async fn configured_base_path_mounts_routes_under_prefix() {
     assert_eq!(missing_root.status(), StatusCode::NOT_FOUND);
 }
 
-#[tokio::test]
-async fn web_proxy_rewrites_page_without_touching_inline_scripts() {
-    let cache_dir = TempDir::new().unwrap();
-    let upstream = spawn_web_upstream_server().await;
-    let app = spawn_proxy_server(cache_dir.path().to_path_buf(), upstream, "/".to_string()).await;
-    let client = Client::new();
-    let url = format!(
-        "http://{}/browse?url={}",
-        app,
-        urlencoding::encode("http://upstream.test/webpage")
-    );
-
-    let response = client.get(url).send().await.unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(
-        response.headers().get("content-type").unwrap(),
-        "text/html; charset=utf-8"
-    );
-
-    let body = response.text().await.unwrap();
-    assert!(body.contains("currency: £"));
-    assert!(body.contains("/browse/http%3A%2F%2Fupstream.test%2Fxjs%2Fscript.js"));
-    assert!(body.contains("Element.prototype.setAttribute"));
-    assert!(body.contains("const literal = 'src=/not-an-attr'"));
-    assert!(body.contains(r#"/https?:\/\//"#));
-    assert!(!body.contains("charset=ISO-8859-1"));
-}
-
 async fn spawn_proxy_server(
     cache_dir: PathBuf,
     upstream_addr: SocketAddr,
@@ -205,11 +174,6 @@ async fn spawn_proxy_server(
             .resolve("upstream.test", upstream_addr)
             .build()
             .unwrap(),
-        web_client: Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .resolve("upstream.test", upstream_addr)
-            .build()
-            .unwrap(),
         cache_dir,
         max_cache_size: 64 * 1024 * 1024,
         max_file_size: 64 * 1024 * 1024,
@@ -217,9 +181,6 @@ async fn spawn_proxy_server(
         db,
         frontend_dist: PathBuf::from("./frontend/missing-dist"),
         base_path,
-        web_cookies: Mutex::new(LruCache::new(
-            NonZeroUsize::new(MAX_WEB_COOKIE_SESSIONS).unwrap(),
-        )),
         cache_usage: Arc::new(CacheUsageTracker::new()),
         api_key: None,
         metrics_handle: None,
@@ -228,34 +189,6 @@ async fn spawn_proxy_server(
 
     let router = build_router(state, PathBuf::from("./frontend/missing-dist"));
     spawn_router(router).await
-}
-
-async fn spawn_web_upstream_server() -> SocketAddr {
-    async fn webpage() -> impl IntoResponse {
-        let body = b"<!doctype html><html><head><meta charset=\"ISO-8859-1\"><title>Fixture</title></head><body>currency: \xA3<script src=/xjs/script.js></script><script>const literal = 'src=/not-an-attr'; const re = /https?:\\/\\//; const img = new Image(); img.src = '/client_204?ok=1'; document.body.appendChild(img);</script></body></html>";
-        (
-            [("content-type", "text/html; charset=ISO-8859-1")],
-            Body::from(body.as_slice()),
-        )
-    }
-
-    async fn script() -> impl IntoResponse {
-        (
-            [("content-type", "application/javascript")],
-            "window.scriptLoaded = true;",
-        )
-    }
-
-    async fn client_204() -> impl IntoResponse {
-        StatusCode::NO_CONTENT
-    }
-
-    let app = Router::new()
-        .route("/webpage", get(webpage))
-        .route("/xjs/script.js", get(script))
-        .route("/client_204", get(client_204));
-
-    spawn_router(app).await
 }
 
 async fn spawn_upstream_server(hit_count: Arc<AtomicUsize>) -> SocketAddr {

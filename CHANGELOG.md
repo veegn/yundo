@@ -104,7 +104,7 @@ docker run -d \
 None
 
 ### Removed
-None
+- Web proxy routes, browser UI, response rewriting, WebSocket forwarding, and server-side web cookie sessions.
 
 ### Known Issues
 - Rate limiting flag added but not yet enforced (planned for next release)
@@ -135,9 +135,7 @@ None
 - Prometheus metrics endpoint (dependencies added)
 - Full error type integration across all handlers
 - Chunked upload optimization (streaming instead of buffering)
-- Security headers for web proxy (CSP, etc.)
 
 ### Under Consideration
 - Cache metadata migration to database
-- Web proxy text rewriting optimization
 - Validation middleware extraction

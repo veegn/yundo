@@ -1,6 +1,6 @@
 # Yundo
 
-Yundo 是一个全能型下载代理、Web 代理及文件中转平台。
+Yundo 是一个下载代理及文件中转平台。
 
 - 后端：Rust + Axum
 - 前端：React + Vite
@@ -12,7 +12,6 @@ Yundo 是一个全能型下载代理、Web 代理及文件中转平台。
 - **代理下载**：高效代理远程 `HTTP/HTTPS` 文件，支持 `HEAD` 探测。
 - **断点续传**：支持 `Range` 请求，完美适配各类下载工具。
 - **本地缓存**：智能磁盘缓存机制，支持自动清理和空间配额管理。
-- **Web 代理**：内置网页浏览器代理，支持 HTML 链接重写及 Cookie 会话隔离。
 - **FileBox**：便捷的文件上传与分享功能，支持设置有效期。
 - **监控告警**：内置 Prometheus 指标采集（`/metrics`）及健康检查。
 - **安全防护**：深度 SSRF 拦截、主机名过滤及 API Key 认证。
@@ -109,21 +108,17 @@ docker run -d \
 - **参数**: `url` (必填, URL 编码)
 - **支持**: `Range` 请求透传、文件名自动提取、SSRF 保护。
 
-### 2. 网页浏览 (`GET /browse`)
-- **参数**: `url` (必填)
-- **功能**: 在代理环境下浏览网页，自动重写静态资源和超链接路径。
-
-### 3. 文件箱 (`FileBox`)
+### 2. 文件箱 (`FileBox`)
 - **上传**: `POST /api/filebox/upload` (支持大文件分片上传)
 - **远程上传**: `POST /api/filebox/remote-upload` (通过 URL 异步转存)
 - **下载**: `GET /api/filebox/download/:id`
 - **列表**: `GET /api/filebox/files`
 - **删除**: `DELETE /api/filebox/delete/:id`
 
-### 4. 历史记录 (`GET /api/recent`)
+### 3. 历史记录 (`GET /api/recent`)
 - 返回最近 50 条下载记录，包含热度得分（基于 7 天下载频次）。
 
-### 5. 系统监控
+### 4. 系统监控
 - **健康检查**: `GET /healthz`
 - **指标采集**: `GET /metrics` (Prometheus 格式)
 

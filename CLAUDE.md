@@ -4,10 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Yundo is a download proxy and history dashboard with three main features:
+Yundo is a download proxy and history dashboard with two main features:
 1. **Proxy downloads** - proxies HTTP/HTTPS files with HEAD detection, Range support, and disk caching
 2. **FileBox** - file upload/download service with chunked uploads and expiration
-3. **Web Proxy** - browse remote websites through the proxy with cookie/session management
 
 Stack: Rust (Axum) backend, React (Vite) frontend, SQLite storage. The Rust server serves both API and static frontend assets.
 
@@ -81,7 +80,6 @@ The backend is organized into focused modules:
 
 - **`app.rs`** - Router configuration with authentication middleware. Supports deployment behind reverse proxies with `X-Forwarded-Prefix` header. Injects runtime base path into SPA index.html.
 - **`proxy.rs`** - Core download proxy logic (`/api/proxy`). Handles HEAD requests, Range headers, SSRF protection, and cache coordination.
-- **`web_proxy.rs`** - Web browsing proxy (`/browse`). Rewrites HTML/CSS/JS to route through proxy, manages cookies per target domain with LRU cache (max 1000 sessions).
 - **`filebox.rs`** - File upload/download service with chunked upload support, automatic expiration cleanup, and atomic quota reservation.
 - **`filebox_utils.rs`** - Quota management helpers (`try_reserve_space`, `release_space`) and validation functions.
 - **`history/mod.rs`** - Download history tracking with 7-day hot score calculation.
@@ -100,7 +98,6 @@ React SPA with client-side routing:
 - **`App.tsx`** - Main router with base path support from `window.__YUNDO_BASE_PATH__`
 - **`pages/ProxyDash.tsx`** - Download history dashboard with hot downloads
 - **`pages/FileBox.tsx`** - File upload/download UI with chunked upload
-- **`pages/WebProxy.tsx`** - Web browsing interface
 - **`context/I18nContext.tsx`** - Internationalization (Chinese/English)
 
 ### Key Patterns
@@ -123,7 +120,7 @@ React SPA with client-side routing:
 - Optional API key via `--api-key` flag
 - Protects upload/delete operations
 - Supports `Authorization: Bearer <key>` or `X-API-Key` header
-- Public routes: download, proxy, browse, healthz
+- Public routes: download, proxy, healthz
 
 **Base Path Support**: 
 - The app supports deployment at non-root paths (e.g., `/yundo`)
@@ -141,10 +138,6 @@ React SPA with client-side routing:
 **History Tracking**: 
 - Every download creates a `download_events` record
 - The `/api/recent` endpoint calculates a "hot score" based on 7-day download frequency and recency
-
-**Web Proxy Rewriting**: 
-- HTML/CSS/JS responses are rewritten to route asset requests through `/browse/{encoded_target_url}`
-- Cookies are stored per target domain in LRU cache (max 1000 sessions)
 
 **Graceful Shutdown**:
 - All background tasks listen for `CancellationToken`
@@ -183,14 +176,13 @@ Integration tests in `tests/integration.rs` spawn real HTTP servers and test end
 Unit tests exist in:
 - `ssrf.rs` - SSRF protection validation
 - `filebox_utils.rs` - Upload ID validation
-- `web_proxy.rs` - HTML/CSS rewriting
 
 When adding features:
 - Add integration tests for new API endpoints
 - Test base path handling if modifying routing
 - Test cache eviction if changing cache logic
 - Test quota reservation for upload operations
-- Test SSRF protection for new proxy endpoints
+- Test SSRF protection for new remote-fetch endpoints
 
 ## Recent Optimizations
 

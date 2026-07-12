@@ -1,20 +1,17 @@
 use clap::Parser;
-use lru::LruCache;
 use precision_proxy::{
     app, cache,
     common::{
         cleanup_temp_files, initialize_cache_dir, initialize_database, parse_socket_addr, AppState,
         Args,
     },
-    constants::{
-        MAX_WEB_COOKIE_SESSIONS, PROXY_CLIENT_TIMEOUT_SECS, WEB_PROXY_CLIENT_TIMEOUT_SECS,
-    },
+    constants::PROXY_CLIENT_TIMEOUT_SECS,
     history::spawn_history_cleanup_task,
     metrics::install_metrics_recorder,
     state::CacheUsageTracker,
 };
 use reqwest::Client;
-use std::{num::NonZeroUsize, sync::Arc, time::Duration};
+use std::{sync::Arc, time::Duration};
 
 #[tokio::main]
 async fn main() {
@@ -56,18 +53,11 @@ async fn main() {
         .build()
         .expect("failed to build HTTP client");
 
-    let web_client = Client::builder()
-        .timeout(Duration::from_secs(WEB_PROXY_CLIENT_TIMEOUT_SECS))
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .expect("failed to build web proxy HTTP client");
-
     let cache_usage = Arc::new(CacheUsageTracker::new());
     let shutdown_token = tokio_util::sync::CancellationToken::new();
 
     let state = Arc::new(AppState {
         client,
-        web_client,
         cache_dir: args.cache_dir.clone(),
         max_cache_size,
         max_file_size,
@@ -75,9 +65,6 @@ async fn main() {
         db: db.clone(),
         frontend_dist: args.frontend_dist.clone(),
         base_path: args.base_path.clone(),
-        web_cookies: tokio::sync::Mutex::new(LruCache::new(
-            NonZeroUsize::new(MAX_WEB_COOKIE_SESSIONS).unwrap(),
-        )),
         cache_usage: cache_usage.clone(),
         api_key: args.api_key.clone(),
         metrics_handle,

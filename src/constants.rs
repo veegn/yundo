@@ -17,26 +17,17 @@ pub const FILEBOX_EXPIRATION_DAYS: i64 = 7;
 /// Maximum age for abandoned temporary chunk directories (24 hours)
 pub const TEMP_CHUNK_MAX_AGE_SECS: u64 = 86400;
 
-/// Maximum size for web proxy text rewriting (50 MB)
-pub const MAX_REWRITE_BYTES: usize = 50 * 1024 * 1024;
-
 /// Default maximum file size (0 = unlimited)
 pub const DEFAULT_MAX_FILE_SIZE: u64 = 0;
 
 /// Channel buffer size for streaming responses
 pub const STREAM_CHANNEL_BUFFER: usize = 16;
 
-/// Maximum number of web proxy cookie sessions to keep in memory
-pub const MAX_WEB_COOKIE_SESSIONS: usize = 1000;
-
 /// Default database connection pool size
 pub const DB_CONNECTION_POOL_SIZE: u32 = 20;
 
 /// HTTP client timeout for proxy requests (300 seconds)
 pub const PROXY_CLIENT_TIMEOUT_SECS: u64 = 300;
-
-/// HTTP client timeout for web proxy requests (60 seconds)
-pub const WEB_PROXY_CLIENT_TIMEOUT_SECS: u64 = 60;
 
 /// Maximum number of redirects to follow
 pub const MAX_REDIRECTS: usize = 10;

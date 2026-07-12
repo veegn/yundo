@@ -11,7 +11,6 @@ export default function Layout() {
   const navLinks = [
     { to: '/', label: t('nav.home') },
     { to: '/filebox', label: t('nav.filebox') },
-    { to: '/webproxy', label: t('nav.webproxy') },
   ];
 
   useEffect(() => {

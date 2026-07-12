@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-axum = { version = "0.7", features = ["multipart", "ws"] }
+axum = { version = "0.7", features = ["multipart"] }
 tokio = { version = "1.36", features = ["full"] }
 reqwest = { version = "0.12", features = ["stream", "rustls-tls", "hickory-dns"] }
 url = "2.5"
@@ -22,8 +22,6 @@ tokio-util = { version = "0.7", features = ["io", "compat"] }
 futures-util = "0.3"
 tokio-stream = { version = "0.1", features = ["sync"] }
 bytes = "1.5"
-encoding_rs = "0.8"
-flate2 = "1.0"
 sqlx = { version = "0.7", features = ["sqlite", "runtime-tokio-rustls", "chrono"] }
 chrono = { version = "0.4", features = ["serde"] }
 libsqlite3-sys = { version = "0.27", features = ["bundled"] }
@@ -31,10 +29,7 @@ urlencoding = "2.1"
 thiserror = "1.0"
 metrics = "0.22"
 metrics-exporter-prometheus = "0.13"
-lru = "0.12"
 hickory-resolver = "0.24"
-tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
-uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
 tempfile = "3"
