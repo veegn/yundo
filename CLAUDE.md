@@ -1,196 +1,127 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file is the working guide for coding agents in this repository. Keep it aligned with the implementation; `README.md` is the user-facing operational documentation.
 
-## Project Overview
+## Project
 
-Yundo is a download proxy and history dashboard with two main features:
-1. **Proxy downloads** - proxies HTTP/HTTPS files with HEAD detection, Range support, and disk caching
-2. **FileBox** - file upload/download service with chunked uploads and expiration
+Yundo is a self-hosted HTTP/HTTPS download proxy and temporary FileBox service.
 
-Stack: Rust (Axum) backend, React (Vite) frontend, SQLite storage. The Rust server serves both API and static frontend assets.
+- Backend: Rust 2021, Axum, Tokio, Reqwest, SQLx/SQLite
+- Frontend: React 19, Vite, TypeScript, React Router
+- Runtime: the Rust binary serves the API and `frontend/dist` when it exists
+- Storage: one local cache directory containing SQLite data, proxy cache files, FileBox files, and temporary upload chunks
 
-## Build & Run Commands
+The Cargo package is named `precision-proxy`, while the product is named Yundo.
 
-### Development
+## Commands
 
-Frontend only (hot reload):
+From the repository root:
+
 ```bash
-npm run dev --workspace=frontend
-```
-
-Backend only (API routes):
-```bash
-cargo run -- --cache-size 1GiB
-```
-
-Full stack (build frontend + run backend):
-```bash
-npm run build
-cargo run -- --cache-size 1GiB
-```
-
-With authentication:
-```bash
-cargo run -- --cache-size 1GiB --api-key your-secret-key
-```
-
-### Testing
-
-Run all tests:
-```bash
-cargo test
-```
-
-Run specific test:
-```bash
-cargo test test_name
-```
-
-Run with output:
-```bash
-cargo test -- --nocapture
-```
-
-### Linting
-
-Frontend TypeScript check:
-```bash
-npm run lint --workspace=frontend
-```
-
-Rust format check:
-```bash
+npm install
+npm run dev                 # frontend development server
+npm run build               # build frontend/dist
+npm run lint                # TypeScript check
+cargo build
 cargo fmt --check
+cargo test
+cargo run -- --cache-size 1GiB
 ```
 
-### Production Build
+The backend refuses to start without the required `--cache-size` argument. For a release binary:
 
 ```bash
 npm run build
 cargo build --release
-./target/release/precision-proxy --cache-size 1GiB --max-file-size 500MB
+./target/release/precision-proxy --cache-size 1GiB
 ```
 
-## Architecture
+## Backend map
 
-### Backend Structure
+- `src/main.rs`: CLI parsing, directory/database initialization, metrics setup, background tasks, listener, and graceful shutdown.
+- `src/app.rs`: Axum route composition, optional frontend serving, base-path handling, and API-key middleware placement.
+- `src/config.rs`: CLI flags, cache-size parsing, socket address parsing, and base-path normalization.
+- `src/state.rs`: `AppState`, SQLite schema initialization, cache usage tracking, and startup temporary-file cleanup.
+- `src/proxy.rs`: `GET`/`HEAD /api/proxy`, upstream requests, response header filtering, filename resolution, streaming, and full-response caching.
+- `src/filebox.rs`: FileBox listing, direct uploads, chunk uploads/merges, remote transfer, range downloads, deletion, and expiry cleanup.
+- `src/filebox_utils.rs`: atomic space reservation, release, upload-size checks, and upload-ID validation.
+- `src/cache.rs`: proxy cache reads, usage calculation, and oldest-first eviction of proxy cache files.
+- `src/history/`: download history storage, seven-day event cleanup, ranking, and `/api/recent` response conversion.
+- `src/metrics.rs`: Prometheus recorder setup, `/metrics`, and HTTP request counters/histograms.
+- `src/middleware.rs`: optional API-key authentication for FileBox mutation routes.
+- `src/ssrf.rs`: hostname/IP-literal SSRF checks and an async DNS-check helper. The current proxy and remote-upload handlers use the hostname/IP-literal check directly; do not document DNS rebinding protection as an active request-path guarantee without changing those handlers.
+- `src/headers.rs`: allowed upstream headers and content-disposition/filename helpers.
+- `src/handlers.rs`: health, root fallback, and not-found responses.
+- `src/common.rs`: compatibility re-export facade for shared types and helpers.
 
-The backend is organized into focused modules:
+## Routes
 
-- **`app.rs`** - Router configuration with authentication middleware. Supports deployment behind reverse proxies with `X-Forwarded-Prefix` header. Injects runtime base path into SPA index.html.
-- **`proxy.rs`** - Core download proxy logic (`/api/proxy`). Handles HEAD requests, Range headers, SSRF protection, and cache coordination.
-- **`filebox.rs`** - File upload/download service with chunked upload support, automatic expiration cleanup, and atomic quota reservation.
-- **`filebox_utils.rs`** - Quota management helpers (`try_reserve_space`, `release_space`) and validation functions.
-- **`history/mod.rs`** - Download history tracking with 7-day hot score calculation.
-- **`cache.rs`** - LRU cache eviction based on disk usage with atomic usage tracking. Runs background task to enforce `max_cache_size`.
-- **`state.rs`** - Shared `AppState` with `CacheUsageTracker` for atomic usage counting, database schema definitions, and graceful shutdown support.
-- **`ssrf.rs`** - Enhanced SSRF protection with DNS resolution checking to prevent DNS rebinding attacks.
-- **`middleware.rs`** - Authentication middleware for API key validation.
-- **`errors.rs`** - Unified error types using `thiserror`.
-- **`constants.rs`** - Centralized configuration constants (intervals, timeouts, limits).
-- **`headers.rs`** - HTTP header utilities for content-type detection and filename extraction.
+Public routes:
 
-### Frontend Structure
+- `GET`/`HEAD /api/proxy?url=...`
+- `GET /api/recent`
+- `GET /api/filebox/files`
+- `GET /api/filebox/download/:id`
+- `GET /healthz`
+- `GET /metrics` (returns `503` if the Prometheus recorder was not installed)
 
-React SPA with client-side routing:
+Protected only when `--api-key` is configured:
 
-- **`App.tsx`** - Main router with base path support from `window.__YUNDO_BASE_PATH__`
-- **`pages/ProxyDash.tsx`** - Download history dashboard with hot downloads
-- **`pages/FileBox.tsx`** - File upload/download UI with chunked upload
-- **`context/I18nContext.tsx`** - Internationalization (Chinese/English)
+- `POST /api/filebox/upload`
+- `POST /api/filebox/upload-chunk`
+- `POST /api/filebox/upload-complete`
+- `POST /api/filebox/upload-abort`
+- `POST /api/filebox/remote-upload`
+- `DELETE /api/filebox/delete/:id`
 
-### Key Patterns
+Authentication accepts `Authorization: Bearer <key>`, a plain `Authorization` value, or `X-API-Key: <key>`. The bundled frontend does not currently add these headers automatically.
 
-**Atomic Quota Management**: 
-- `CacheUsageTracker` maintains atomic counter of cache usage
-- `try_reserve_space()` atomically reserves space before upload
-- `release_space()` releases on failure or completion
-- Prevents concurrent upload race conditions
-- Recalibrates actual usage every 5 minutes
+The frontend routes are `/`, `/proxydash`, `/filebox`, `/privacy`, and `/terms`. It uses the runtime base path injected by the backend and calls the API through that prefix.
 
-**Enhanced SSRF Protection**:
-- Two-layer validation: hostname check + DNS resolution
-- Blocks private IPs: 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16
-- Blocks loopback: 127.0.0.0/8, ::1
-- Blocks link-local: 169.254.0.0/16, fe80::/10
-- Prevents DNS rebinding attacks
+## Important behavior
 
-**Authentication**:
-- Optional API key via `--api-key` flag
-- Protects upload/delete operations
-- Supports `Authorization: Bearer <key>` or `X-API-Key` header
-- Public routes: download, proxy, healthz
+- `--cache-size` is the shared limit for proxy `.data` files, active FileBox files, and temporary chunk files. `--filebox-size` is still parsed for CLI compatibility but is not used as a separate quota.
+- `--max-file-size` defaults to `0` (unlimited). Direct and remote uploads check the configured limit; chunk uploads check each chunk, while the merge endpoint combines the already accepted chunks.
+- Full successful proxy responses are cached using paired `.data` and `.meta` files. `Range` proxy requests bypass the cache. FileBox downloads support byte ranges and return `206`/`416` as appropriate.
+- FileBox metadata is stored in `proxy.db`; files expire after seven days and are removed by a background task.
+- The cache usage counter is recalibrated from disk/database state periodically. Cache eviction removes oldest proxy cache files; it does not evict active FileBox files.
+- Startup removes top-level `*.tmp` files. Abandoned chunk directories are cleaned up by the FileBox background task.
+- `--rate-limit-per-minute` is parsed and logged but no rate-limiting middleware is installed. Do not describe it as active protection.
+- CORS is permissive (`CorsLayer::permissive()`). Any deployment that needs origin restrictions must add an explicit policy.
 
-**Base Path Support**: 
-- The app supports deployment at non-root paths (e.g., `/yundo`)
-- Backend reads `X-Forwarded-Prefix` header and injects `window.__YUNDO_BASE_PATH__` into the SPA
-- Frontend uses this for all routing and API calls
+## Configuration examples
 
-**Cache Flow**: 
-1. Request arrives at `/api/proxy?url=...`
-2. Check if cached (hash-based filename in `cache_dir`)
-3. If cached and no Range header, serve from disk
-4. Otherwise, fetch from upstream, stream to client, save to cache
-5. Background task evicts oldest files when total size exceeds `max_cache_size`
-6. Atomic counter tracks usage in real-time
-
-**History Tracking**: 
-- Every download creates a `download_events` record
-- The `/api/recent` endpoint calculates a "hot score" based on 7-day download frequency and recency
-
-**Graceful Shutdown**:
-- All background tasks listen for `CancellationToken`
-- CTRL+C triggers graceful shutdown
-- Tasks complete current work before stopping
-
-## Important Notes
-
-- `--cache-size` is **required** - the app will not start without it
-- Cache size supports units: `512MB`, `2GB`, `1GiB` (binary) or raw bytes
-- `--max-file-size` limits individual file uploads (default: 500MB)
-- SQLite database is created at `{cache_dir}/proxy.db`
-- FileBox files expire after 7 days (configurable in `constants.rs`)
-- SSRF protection blocks private IPs and performs DNS resolution checks
-- The package name is `precision-proxy` but the project is called Yundo
-- Temporary files are cleaned up on startup to prevent disk space leaks
-
-## Configuration Flags
+Development with a frontend dev server:
 
 ```bash
---cache-dir <PATH>              # Cache directory (default: ./cache)
---cache-size <SIZE>             # Total cache size (required, e.g., 1GiB)
---max-file-size <SIZE>          # Max single file size (default: 500MB)
---host <IP>                     # Bind address (default: 0.0.0.0)
---port <PORT>                   # Port (default: 8080)
---frontend-dist <PATH>          # Frontend build directory (default: ./frontend/dist)
---base-path <PATH>              # Base URL path (default: /)
---api-key <KEY>                 # API key for authentication (optional)
---rate-limit-per-minute <NUM>   # Rate limit per IP (default: 60, not yet enforced)
+cargo run -- --cache-size 1GiB
+npm run dev
 ```
 
-## Testing
+Sub-path deployment:
 
-Integration tests in `tests/integration.rs` spawn real HTTP servers and test end-to-end flows. Tests use `tempfile::TempDir` for isolated cache directories.
+```bash
+cargo run -- --cache-size 1GiB --base-path /yundo
+```
 
-Unit tests exist in:
-- `ssrf.rs` - SSRF protection validation
-- `filebox_utils.rs` - Upload ID validation
+Authentication:
 
-When adding features:
-- Add integration tests for new API endpoints
-- Test base path handling if modifying routing
-- Test cache eviction if changing cache logic
-- Test quota reservation for upload operations
-- Test SSRF protection for new remote-fetch endpoints
+```bash
+cargo run -- --cache-size 1GiB --api-key your-secret-key
+```
 
-## Recent Optimizations
+Docker builds the frontend in a separate stage and runs the Rust binary as a non-root user. The image command must include `--cache-size`.
 
-The codebase has been optimized for:
-- **Performance**: Atomic cache usage tracking (~100x faster than directory scanning)
-- **Security**: Enhanced SSRF protection with DNS checking, API key authentication
-- **Reliability**: Atomic quota reservation prevents race conditions
-- **Maintainability**: Centralized constants, unified error handling
-- **Resource Management**: LRU cookie cache, graceful shutdown, temp file cleanup
+## Testing guidance
 
-See `OPTIMIZATION_SUMMARY.md` for detailed changes.
+Integration tests in `tests/integration.rs` exercise proxy `HEAD`, full-response caching, range-cache bypass, base-path routing, and FileBox range downloads. Tests use temporary cache directories and a local upstream server.
+
+When changing:
+
+- routes or base-path handling, update route/integration tests;
+- cache behavior, verify both full downloads and `Range` requests;
+- FileBox uploads or quota accounting, test direct, chunked, remote, cleanup, and failure paths;
+- SSRF checks, cover both hostname/IP-literal validation and any DNS-resolution behavior actually wired into request handlers;
+- frontend API calls or routes, run `npm run lint` and `npm run build`.
+
+Do not rely on historical optimization reports; they were removed because they described superseded modules and stale implementation status.

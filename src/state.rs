@@ -26,7 +26,7 @@ pub struct CacheMeta {
     pub status: u16,
 }
 
-/// JSON shape returned by `/api/recent` and `/api/history`.
+/// JSON shape returned by `/api/recent`.
 #[derive(Serialize)]
 pub struct HistoryItem {
     pub slug: String,

@@ -1,25 +1,17 @@
 # Yundo
 
-Yundo 是一个下载代理及文件中转平台。
+Yundo 是一个自托管的 HTTP/HTTPS 下载代理和临时文件箱。Rust 服务同时提供 API 与构建后的 React 前端，数据保存在本地磁盘和 SQLite 中。
 
-- 后端：Rust + Axum
-- 前端：React + Vite
-- 存储：SQLite
-- 部署：Rust 服务同时提供 API 和前端静态资源
+## 当前功能
 
-## 功能
+- 下载代理：支持 `GET`、`HEAD`、`Range`，会提取文件名并转发常用响应头。
+- 代理缓存：完整下载会写入磁盘缓存；带 `Range` 的代理请求直接转发，不写入缓存。
+- 临时文件箱：支持普通 multipart 上传、分块上传、通过 URL 转存、下载和删除；文件默认保留 7 天。
+- 下载历史：记录代理下载，`/api/recent` 返回按近 7 天下载次数和最近使用时间排序的最多 50 条记录。
+- 可观测性：提供 `/healthz` 健康检查和 Prometheus 格式的 `/metrics` 指标。
+- 安全控制：可选 API Key 认证；代理和远程转存会拒绝常见本机、私有网段和链路本地目标。
 
-- **代理下载**：高效代理远程 `HTTP/HTTPS` 文件，支持 `HEAD` 探测。
-- **断点续传**：支持 `Range` 请求，完美适配各类下载工具。
-- **本地缓存**：智能磁盘缓存机制，支持自动清理和空间配额管理。
-- **FileBox**：便捷的文件上传与分享功能，支持设置有效期。
-- **监控告警**：内置 Prometheus 指标采集（`/metrics`）及健康检查。
-- **安全防护**：深度 SSRF 拦截、主机名过滤及 API Key 认证。
-- **性能卓越**：基于 Rust 异步 IO，支持高并发处理及优雅停机。
-
-## 本地运行
-
-环境要求：
+## 运行要求
 
 - Node.js 18+
 - npm
@@ -32,26 +24,28 @@ npm install
 cargo build
 ```
 
-前端开发：
+前端开发服务器：
 
 ```bash
-npm run dev --workspace=frontend
+npm run dev
 ```
 
-完整运行：
+启动后端（`--cache-size` 必须提供）：
+
+```bash
+cargo run -- --cache-size 1GiB
+```
+
+构建前端并运行完整服务：
 
 ```bash
 npm run build
 cargo run -- --cache-size 1GiB
 ```
 
-默认访问地址：
+默认地址为 `http://127.0.0.1:8080`。如果 `frontend/dist/index.html` 不存在，服务仍会启动，但只提供 API。
 
-```text
-http://127.0.0.1:8080
-```
-
-## 服务参数
+## 配置参数
 
 ```bash
 cargo run -- \
@@ -60,36 +54,85 @@ cargo run -- \
   --cache-dir ./cache \
   --cache-size 1GiB \
   --max-file-size 0 \
-  --filebox-size 5GB \
   --api-key your-secret-key \
   --base-path / \
   --frontend-dist ./frontend/dist
 ```
 
-参数说明：
-
-| 参数 | 描述 | 默认值 |
+| 参数 | 默认值 | 说明 |
 | :--- | :--- | :--- |
-| `--cache-size` | **(必填)** 下载代理的最大缓存容量 | - |
-| `--cache-dir` | 数据存储目录（缓存、数据库、文件箱） | `./cache` |
-| `--host` | 绑定主机地址 | `0.0.0.0` |
-| `--port` | 监听端口 | `8080` |
-| `--max-file-size` | 下载代理允许的最大文件大小 | `0` (不限制) |
-| `--filebox-size` | 文件箱总容量上限 | `5GB` |
-| `--api-key` | 启用 API Key 认证（Header: `X-API-Key`） | 无 |
-| `--rate-limit-per-minute` | 每分钟请求速率限制 | `60` |
-| `--base-path` | 服务挂载的基础路径 | `/` |
-| `--frontend-dist` | 前端静态资源目录 | `./frontend/dist` |
+| `--cache-dir` | `./cache` | 缓存目录，同时保存 SQLite 数据库、代理缓存和 FileBox 文件。 |
+| `--cache-size` | 必填 | 代理缓存、有效 FileBox 文件和临时分块共同使用的总空间上限；支持字节、`KB`/`MB`/`GB`/`TB` 及 `KiB`/`MiB`/`GiB`/`TiB`。 |
+| `--max-file-size` | `0` | 上传大小限制；`0` 表示不限制。分块上传接口按分块检查。 |
+| `--host` | `0.0.0.0` | 监听地址，必须是 IP 地址。 |
+| `--port` | `8080` | 监听端口。 |
+| `--frontend-dist` | `./frontend/dist` | 前端构建产物目录。 |
+| `--base-path` | `/` | 挂载基础路径，例如 `/yundo`。 |
+| `--api-key` | 未启用 | 启用后保护 FileBox 的上传、分块、转存、中止和删除接口。 |
+| `--rate-limit-per-minute` | `60` | 当前仅被解析并写入启动日志，尚未执行请求限流。 |
+| `--filebox-size` | `5GB` | CLI 兼容参数；当前没有独立 FileBox 配额，实际空间限制由 `--cache-size` 控制。 |
 
-## Docker 部署
+缓存目录主要包含：
 
-拉取镜像：
+- `proxy.db`：FileBox 元数据、下载历史和下载事件。
+- `*.data` / `*.meta`：代理缓存内容及响应元数据。
+- `filebox/`：有效 FileBox 文件。
+- `filebox_tmp/`：分块上传中的临时文件。
 
-```bash
-docker pull ghcr.io/veegn/yundo:latest
+## API
+
+以下路径默认挂载在根路径；使用 `--base-path /yundo` 或反向代理提供 `X-Forwarded-Prefix: /yundo` 时，需要在路径前加对应前缀。
+
+### 下载代理
+
+```text
+GET  /api/proxy?url=<URL 编码后的 HTTP/HTTPS 地址>
+HEAD /api/proxy?url=<URL 编码后的 HTTP/HTTPS 地址>
 ```
 
-启动容器：
+代理会透传 `Range` 请求和部分下载相关响应头，并根据响应或 URL 推断文件名。完整成功响应会缓存；带 `Range` 的请求不缓存。
+
+示例：
+
+```bash
+curl -L "http://127.0.0.1:8080/api/proxy?url=https%3A%2F%2Fexample.com%2Ffile.zip" -o file.zip
+```
+
+### FileBox
+
+| 方法 | 路径 | 说明 |
+| :--- | :--- | :--- |
+| `GET` | `/api/filebox/files` | 返回空间使用量和未过期文件列表。 |
+| `POST` | `/api/filebox/upload` | multipart 上传一个或多个文件。字段名可为任意文件字段。 |
+| `POST` | `/api/filebox/upload-chunk` | multipart 上传分块，字段为 `upload_id`、`chunk_index`、`file`。 |
+| `POST` | `/api/filebox/upload-complete` | JSON 合并分块：`{"upload_id":"...","file_name":"...","total_chunks":3}`。 |
+| `POST` | `/api/filebox/upload-abort` | JSON 取消分块上传：`{"upload_id":"..."}`。 |
+| `POST` | `/api/filebox/remote-upload` | JSON 远程转存：`{"url":"https://example.com/file.zip"}`。 |
+| `GET` | `/api/filebox/download/:id` | 下载文件，支持 `Range`。 |
+| `DELETE` | `/api/filebox/delete/:id` | 删除文件。 |
+
+FileBox 下载链接不需要额外签名；文件过期或记录不存在时返回 `404`。启用 API Key 后，上传、分块、转存、中止和删除请求需要携带以下任一请求头：
+
+```text
+Authorization: Bearer your-secret-key
+X-API-Key: your-secret-key
+```
+
+内置前端当前不会自动注入 API Key；启用认证时，请通过能设置请求头的客户端调用受保护接口。
+
+### 历史、健康检查和指标
+
+```text
+GET /api/recent
+GET /healthz
+GET /metrics
+```
+
+`/api/recent` 最多返回 50 条记录，字段包括 `slug`、`url`、`file_name`、`file_size`、`last_download_at`、`count_7d` 和 `score`。`/healthz` 成功时返回 `ok`。Prometheus 记录器安装失败时，`/metrics` 返回 `503`。
+
+## Docker
+
+直接运行镜像时必须提供 `--cache-size`：
 
 ```bash
 docker run -d \
@@ -102,31 +145,15 @@ docker run -d \
   --api-key my-secret-auth
 ```
 
-## API 指南
+## 检查与测试
 
-### 1. 下载代理 (`GET /api/proxy`)
-- **参数**: `url` (必填, URL 编码)
-- **支持**: `Range` 请求透传、文件名自动提取、SSRF 保护。
-
-### 2. 文件箱 (`FileBox`)
-- **上传**: `POST /api/filebox/upload` (支持大文件分片上传)
-- **远程上传**: `POST /api/filebox/remote-upload` (通过 URL 异步转存)
-- **下载**: `GET /api/filebox/download/:id`
-- **列表**: `GET /api/filebox/files`
-- **删除**: `DELETE /api/filebox/delete/:id`
-
-### 3. 历史记录 (`GET /api/recent`)
-- 返回最近 50 条下载记录，包含热度得分（基于 7 天下载频次）。
-
-### 4. 系统监控
-- **健康检查**: `GET /healthz`
-- **指标采集**: `GET /metrics` (Prometheus 格式)
-
-## 安全说明
-
-- **SSRF 拦截**: 自动屏蔽私有网段（127.0.0.1, 192.168.x.x 等）及受限制的主机名。
-- **认证**: 若配置了 `--api-key`，所有 API 请求需在 Header 中携带 `X-API-Key`。
+```bash
+npm run lint
+npm run build
+cargo fmt --check
+cargo test
+```
 
 ## License
 
-本项目使用 MIT License。见 [LICENSE](LICENSE)。
+本项目使用 MIT License，详见 [LICENSE](LICENSE)。
