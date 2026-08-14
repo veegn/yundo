@@ -30,7 +30,6 @@ async fn main() {
     tracing::info!("max_cache_size = {}", max_cache_size);
     tracing::info!("max_file_size = {}", max_file_size);
     tracing::info!("base_path = {}", args.base_path);
-    tracing::info!("rate_limit_per_minute = {}", args.rate_limit_per_minute);
 
     if args.api_key.is_some() {
         tracing::info!("API key authentication enabled");

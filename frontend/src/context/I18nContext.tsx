@@ -4,7 +4,6 @@ const translations = {
   zh: {
     // Navigation / Layout
     'nav.home': '首页',
-    'nav.history': '历史记录',
     'nav.filebox': '临时文件箱',
     'footer.desc': '高效、稳定的文件代理下载服务，让资源获取更简单。',
     'footer.github': 'GitHub',
@@ -21,29 +20,10 @@ const translations = {
     'dashboard.placeholder': 'https://example.com/large-file.zip',
     'dashboard.btn_download': '开始下载',
     'dashboard.hot_downloads': '热门下载',
-    'dashboard.view_all_history': '查看全部历史',
-    'dashboard.browse_resources': '浏览资源列表',
     'dashboard.loading': '加载中...',
     'dashboard.no_history': '暂无下载记录',
     'dashboard.count_7d': '7 天内下载 {count} 次',
     'dashboard.re_download': '重新下载',
-    'dashboard.detail': '详情',
-
-    // ProxyDash (History) Page
-    'seo.proxydash.title': '下载历史记录 - 云渡',
-    'seo.proxydash.description': '查看云渡最近处理过的热门下载记录，包括文件名、文件大小、最近处理时间和下载热度。',
-    'seo.proxydash.keywords': '下载历史,热门下载,文件记录,下载热度',
-    'proxydash.title': '下载历史记录',
-    'proxydash.subtitle': '管理并重新下载您之前处理过的所有文件记录。列表已按下载热度排序。',
-    'proxydash.table.filename': '文件名',
-    'proxydash.table.url': '原始链接',
-    'proxydash.table.size': '大小',
-    'proxydash.table.score': '热度 / 7天下载',
-    'proxydash.table.time': '最近处理时间',
-    'proxydash.table.action': '操作',
-    'proxydash.action.details': '详情',
-    'proxydash.action.download': '下载',
-    'proxydash.pagination': '显示 1 到 {count}，共 {count} 条记录',
 
     // FileBox Page
     'seo.filebox.title': '临时文件箱 - 云渡',
@@ -94,7 +74,6 @@ const translations = {
   en: {
     // Navigation / Layout
     'nav.home': 'Home',
-    'nav.history': 'History',
     'nav.filebox': 'File Box',
     'footer.desc': 'Efficient and stable file proxy download service, making resource acquisition simpler.',
     'footer.github': 'GitHub',
@@ -111,29 +90,10 @@ const translations = {
     'dashboard.placeholder': 'https://example.com/large-file.zip',
     'dashboard.btn_download': 'Download',
     'dashboard.hot_downloads': 'Trending',
-    'dashboard.view_all_history': 'All History',
-    'dashboard.browse_resources': 'Browse Resource List',
     'dashboard.loading': 'Loading...',
     'dashboard.no_history': 'No download records yet',
     'dashboard.count_7d': 'Downloaded {count} times in 7 days',
     'dashboard.re_download': 'Re-download',
-    'dashboard.detail': 'Details',
-
-    // ProxyDash (History) Page
-    'seo.proxydash.title': 'Download History - Yundo',
-    'seo.proxydash.description': 'View hot download records recently processed by Yundo, including file name, file size, last processed time, and download popularity.',
-    'seo.proxydash.keywords': 'download history,trending downloads,file records,download popularity',
-    'proxydash.title': 'Download History',
-    'proxydash.subtitle': 'Manage and re-download all file records you have processed before. The list is sorted by download popularity.',
-    'proxydash.table.filename': 'File Name',
-    'proxydash.table.url': 'Original URL',
-    'proxydash.table.size': 'Size',
-    'proxydash.table.score': 'Score / 7D Downloads',
-    'proxydash.table.time': 'Last Processed',
-    'proxydash.table.action': 'Action',
-    'proxydash.action.details': 'Details',
-    'proxydash.action.download': 'Download',
-    'proxydash.pagination': 'Showing 1 to {count} of {count} records',
 
     // FileBox Page
     'seo.filebox.title': 'Temporary File Bin - Yundo',

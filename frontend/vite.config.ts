@@ -24,7 +24,6 @@ export default defineConfig(({ mode }) => {
       // Start the Rust server first: cargo run -- --cache-size 1GiB
       proxy: {
         '/api': 'http://localhost:8080',
-        '/downloads': 'http://localhost:8080',
         '/robots.txt': 'http://localhost:8080',
         '/sitemap.xml': 'http://localhost:8080',
         '/healthz': 'http://localhost:8080',

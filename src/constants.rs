@@ -31,9 +31,3 @@ pub const PROXY_CLIENT_TIMEOUT_SECS: u64 = 300;
 
 /// Maximum number of redirects to follow
 pub const MAX_REDIRECTS: usize = 10;
-
-/// Rate limit: requests per minute per IP
-pub const RATE_LIMIT_PER_MINUTE: u64 = 60;
-
-/// Rate limit: burst size
-pub const RATE_LIMIT_BURST: u64 = 10;

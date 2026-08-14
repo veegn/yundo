@@ -76,7 +76,7 @@ Protected only when `--api-key` is configured:
 
 Authentication accepts `Authorization: Bearer <key>`, a plain `Authorization` value, or `X-API-Key: <key>`. The bundled frontend does not currently add these headers automatically.
 
-The frontend routes are `/`, `/proxydash`, `/filebox`, `/privacy`, and `/terms`. It uses the runtime base path injected by the backend and calls the API through that prefix.
+The frontend routes are `/`, `/filebox`, `/privacy`, and `/terms`. It uses the runtime base path injected by the backend and calls the API through that prefix.
 
 ## Important behavior
 
@@ -86,7 +86,6 @@ The frontend routes are `/`, `/proxydash`, `/filebox`, `/privacy`, and `/terms`.
 - FileBox metadata is stored in `proxy.db`; files expire after seven days and are removed by a background task.
 - The cache usage counter is recalibrated from disk/database state periodically. Cache eviction removes oldest proxy cache files; it does not evict active FileBox files.
 - Startup removes top-level `*.tmp` files. Abandoned chunk directories are cleaned up by the FileBox background task.
-- `--rate-limit-per-minute` is parsed and logged but no rate-limiting middleware is installed. Do not describe it as active protection.
 - CORS is permissive (`CorsLayer::permissive()`). Any deployment that needs origin restrictions must add an explicit policy.
 
 ## Configuration examples

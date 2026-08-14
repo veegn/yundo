@@ -31,9 +31,6 @@ pub struct Args {
 
     #[arg(long)]
     pub api_key: Option<String>,
-
-    #[arg(long, default_value_t = 60)]
-    pub rate_limit_per_minute: u64,
 }
 
 pub fn parse_cache_size(input: &str) -> Result<u64, String> {

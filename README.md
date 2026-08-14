@@ -69,7 +69,6 @@ cargo run -- \
 | `--frontend-dist` | `./frontend/dist` | 前端构建产物目录。 |
 | `--base-path` | `/` | 挂载基础路径，例如 `/yundo`。 |
 | `--api-key` | 未启用 | 启用后保护 FileBox 的上传、分块、转存、中止和删除接口。 |
-| `--rate-limit-per-minute` | `60` | 当前仅被解析并写入启动日志，尚未执行请求限流。 |
 | `--filebox-size` | `5GB` | CLI 兼容参数；当前没有独立 FileBox 配额，实际空间限制由 `--cache-size` 控制。 |
 
 缓存目录主要包含：

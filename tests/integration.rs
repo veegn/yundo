@@ -153,12 +153,12 @@ async fn configured_base_path_mounts_routes_under_prefix() {
     let download_response = client.get(&proxy_url).send().await.unwrap();
     assert_eq!(download_response.status(), StatusCode::OK);
 
-    let missing_root = client
-        .get(format!("http://{app}/downloads"))
+    let route_outside_base_path = client
+        .get(format!("http://{app}/api/recent"))
         .send()
         .await
         .unwrap();
-    assert_eq!(missing_root.status(), StatusCode::NOT_FOUND);
+    assert_eq!(route_outside_base_path.status(), StatusCode::NOT_FOUND);
 }
 
 async fn spawn_proxy_server(

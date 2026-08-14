@@ -1,7 +1,6 @@
 import { BrowserRouter, Routes, Route } from 'react-router-dom';
 import Layout from './components/Layout';
 import Dashboard from './pages/Dashboard';
-import ProxyDash from './pages/ProxyDash';
 import FileBox from './pages/FileBox';
 import Privacy from './pages/Privacy';
 import Terms from './pages/Terms';
@@ -18,7 +17,6 @@ export default function App() {
         <Routes>
           <Route path="/" element={<Layout />}>
             <Route index element={<Dashboard />} />
-            <Route path="proxydash" element={<ProxyDash />} />
             <Route path="filebox" element={<FileBox />} />
             <Route path="privacy" element={<Privacy />} />
             <Route path="terms" element={<Terms />} />
