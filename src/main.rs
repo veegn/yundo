@@ -5,13 +5,11 @@ use precision_proxy::{
         cleanup_temp_files, initialize_cache_dir, initialize_database, parse_socket_addr, AppState,
         Args,
     },
-    constants::PROXY_CLIENT_TIMEOUT_SECS,
     history::spawn_history_cleanup_task,
     metrics::install_metrics_recorder,
     state::CacheUsageTracker,
 };
-use reqwest::Client;
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 
 #[tokio::main]
 async fn main() {
@@ -46,9 +44,7 @@ async fn main() {
         }
     };
 
-    let client = Client::builder()
-        .timeout(Duration::from_secs(PROXY_CLIENT_TIMEOUT_SECS))
-        .redirect(reqwest::redirect::Policy::limited(10))
+    let client = precision_proxy::ssrf::safe_client_builder()
         .build()
         .expect("failed to build HTTP client");
 

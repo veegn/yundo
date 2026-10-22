@@ -9,6 +9,11 @@ use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum AppError {
+    #[error("Invalid upload: {0}")]
+    InvalidUpload(&'static str),
+
+    #[error("Chunk already exists")]
+    UploadConflict,
     #[error("Invalid URL format")]
     InvalidUrl,
 
@@ -70,6 +75,8 @@ pub enum AppError {
 impl AppError {
     pub fn status_code(&self) -> StatusCode {
         match self {
+            AppError::InvalidUpload(_) => StatusCode::BAD_REQUEST,
+            AppError::UploadConflict => StatusCode::CONFLICT,
             AppError::InvalidUrl
             | AppError::UnsupportedScheme
             | AppError::InvalidUploadId

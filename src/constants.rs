@@ -31,3 +31,6 @@ pub const PROXY_CLIENT_TIMEOUT_SECS: u64 = 300;
 
 /// Maximum number of redirects to follow
 pub const MAX_REDIRECTS: usize = 10;
+
+/// Match the bundled frontend's chunk size, enforced while streaming.
+pub const MAX_UPLOAD_CHUNK_BYTES: u64 = 72 * 1024 * 1024;

@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { formatBytes, getIconForFileName } from '../utils/formatters';
-import { withBasePath } from '../utils/basePath';
+import { getBasePath, withBasePath } from '../utils/basePath';
 import { useI18n } from '../context/I18nContext';
 
 interface FileBoxItem {
@@ -15,10 +15,23 @@ interface Stats {
   total_space: number;
   used_space: number;
   files: FileBoxItem[];
+  auth_required?: boolean;
+  max_file_size?: number;
 }
 
 export default function FileBox() {
   const { locale, t } = useI18n();
+  const keyStorage = `yundo-api-key:${getBasePath()}`;
+  const [apiKey, setApiKey] = useState(() => {
+    try { return sessionStorage.getItem(keyStorage) ?? ''; } catch { return ''; }
+  });
+  useEffect(() => {
+    try {
+      if (apiKey) sessionStorage.setItem(keyStorage, apiKey);
+      else sessionStorage.removeItem(keyStorage);
+    } catch { /* Storage may be unavailable in private browser contexts. */ }
+  }, [apiKey, keyStorage]);
+  const authHeaders = (): Record<string, string> => apiKey ? { 'X-API-Key': apiKey } : {};
   const [stats, setStats] = useState<Stats>({
     total_space: 5 * 1024 * 1024 * 1024,
     used_space: 0,
@@ -86,6 +99,10 @@ export default function FileBox() {
   };
 
   const uploadFiles = async (files: FileList) => {
+    if (stats.max_file_size && Array.from(files).some(file => file.size > stats.max_file_size!)) {
+      setErrorMessage(locale === 'zh' ? `单文件不能超过 ${formatBytes(stats.max_file_size)}` : `Files must not exceed ${formatBytes(stats.max_file_size)}`);
+      return;
+    }
     setUploading(true);
     setErrorMessage(null);
     setUploadProgress(0);
@@ -153,6 +170,7 @@ export default function FileBox() {
       return new Promise((resolve, reject) => {
         const xhr = new XMLHttpRequest();
         xhr.open('POST', withBasePath('/api/filebox/upload-chunk'));
+        for (const [name, value] of Object.entries(authHeaders())) xhr.setRequestHeader(name, value);
 
         activeXhrs[chunkKey] = xhr;
 
@@ -173,7 +191,7 @@ export default function FileBox() {
             let errText = xhr.responseText;
             try {
               const errObj = JSON.parse(errText);
-              errText = errObj.message || errText;
+              errText = errObj.error || errObj.message || errText;
             } catch (e) {}
             reject(new Error(errText || t('filebox.err.upload_failed')));
           }
@@ -240,12 +258,15 @@ export default function FileBox() {
         for (let w = 0; w < numWorkers; w++) {
           workers.push(uploadWorker());
         }
-        await Promise.all(workers);
+        const outcomes = await Promise.allSettled(workers);
+        const failed = outcomes.find((outcome) => outcome.status === 'rejected');
+        if (failed?.status === 'rejected') throw failed.reason;
       } catch (err: any) {
         // Proactively signal backend to delete partial chunks
-        fetch(withBasePath('/api/filebox/upload-abort'), {
+        await fetch(withBasePath('/api/filebox/upload-abort'), {
           method: 'POST',
           headers: {
+            ...authHeaders(),
             'Content-Type': 'application/json'
           },
           body: JSON.stringify({ upload_id: uploadId })
@@ -261,6 +282,7 @@ export default function FileBox() {
         const resComplete = await fetch(withBasePath('/api/filebox/upload-complete'), {
           method: 'POST',
           headers: {
+            ...authHeaders(),
             'Content-Type': 'application/json'
           },
           body: JSON.stringify({
@@ -275,6 +297,11 @@ export default function FileBox() {
            throw new Error(errText || t('filebox.err.upload_failed'));
         }
       } catch (err: any) {
+        await fetch(withBasePath('/api/filebox/upload-abort'), {
+          method: 'POST',
+          headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+          body: JSON.stringify({ upload_id: uploadId }),
+        }).catch(() => {});
         setUploading(false);
         setErrorMessage(err.message || t('filebox.err.network'));
         return;
@@ -301,6 +328,7 @@ export default function FileBox() {
     fetch(withBasePath('/api/filebox/remote-upload'), {
       method: 'POST',
       headers: {
+        ...authHeaders(),
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({ url: remoteUrl.trim() }),
@@ -328,7 +356,7 @@ export default function FileBox() {
   const handleDelete = (id: string) => {
     if (!confirm(t('filebox.delete.confirm'))) return;
 
-    fetch(withBasePath(`/api/filebox/delete/${id}`), { method: 'DELETE' })
+    fetch(withBasePath(`/api/filebox/delete/${id}`), { method: 'DELETE', headers: authHeaders() })
       .then((res) => {
         if (!res.ok) throw new Error('Delete failed');
         fetchFiles();
@@ -396,6 +424,24 @@ export default function FileBox() {
         <p className="text-on-surface-variant max-w-xl mx-auto mb-8">
           {t('filebox.subtitle')}
         </p>
+
+        {stats.auth_required && (
+          <label className="block text-left text-sm font-medium mb-6">
+            {locale === 'zh' ? '访问密钥' : 'API key'}
+            <input
+              type="password"
+              autoComplete="off"
+              value={apiKey}
+              onChange={(event) => setApiKey(event.target.value)}
+              disabled={uploading || remoteTransferring}
+              placeholder={locale === 'zh' ? '输入服务配置的 API Key' : 'Enter the configured API key'}
+              className="mt-2 w-full bg-surface-container-high border border-outline-variant/40 rounded-xl py-3 px-4 outline-none focus:border-secondary"
+            />
+            <span className="block mt-2 text-xs text-on-surface-variant">
+              {locale === 'zh' ? '密钥仅保存在当前浏览器会话中，用于上传、转存和删除。' : 'Stored in this browser session for uploads, transfers and deletion.'}
+            </span>
+          </label>
+        )}
 
         {/* Storage usage bar */}
         <div className="bg-surface-container-low p-6 rounded-2xl ghost-border ghost-shadow text-left mb-8">

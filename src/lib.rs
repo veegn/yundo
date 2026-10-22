@@ -14,3 +14,4 @@ pub mod middleware;
 pub mod proxy;
 pub mod ssrf;
 pub mod state;
+pub mod storage;

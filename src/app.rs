@@ -27,13 +27,15 @@ pub fn build_router(state: Arc<AppState>, frontend_dist: PathBuf) -> Router {
         )
         .route(
             "/api/filebox/upload-chunk",
-            axum::routing::post(crate::filebox::upload_chunk_handler)
-                .layer(axum::extract::DefaultBodyLimit::disable()),
+            axum::routing::post(crate::filebox::upload_chunk_handler).layer(
+                axum::extract::DefaultBodyLimit::max(
+                    crate::constants::MAX_UPLOAD_CHUNK_BYTES as usize + 16 * 1024,
+                ),
+            ),
         )
         .route(
             "/api/filebox/upload-complete",
-            axum::routing::post(crate::filebox::upload_complete_handler)
-                .layer(axum::extract::DefaultBodyLimit::disable()),
+            axum::routing::post(crate::filebox::upload_complete_handler),
         )
         .route(
             "/api/filebox/upload-abort",
@@ -75,6 +77,8 @@ pub fn build_router(state: Arc<AppState>, frontend_dist: PathBuf) -> Router {
         inner_router = inner_router
             .route("/", get(spa_index_handler))
             .route("/filebox", get(spa_index_handler))
+            .route("/privacy", get(spa_index_handler))
+            .route("/terms", get(spa_index_handler))
             .route("/index.html", get(spa_index_handler))
             .nest_service("/assets", ServeDir::new(frontend_dist.join("assets")))
             .fallback(get(base_aware_not_found_handler));
@@ -88,9 +92,7 @@ pub fn build_router(state: Arc<AppState>, frontend_dist: PathBuf) -> Router {
             .fallback(get(base_aware_not_found_handler));
     }
 
-    let inner_router = inner_router
-        .layer(axum::extract::DefaultBodyLimit::disable())
-        .with_state(state.clone());
+    let inner_router = inner_router.with_state(state.clone());
 
     let final_router = if state.base_path == "/" {
         inner_router
@@ -101,10 +103,17 @@ pub fn build_router(state: Arc<AppState>, frontend_dist: PathBuf) -> Router {
                 "/",
                 get(move || async move { Redirect::permanent(&redirect_target) }),
             )
+            .route(
+                &format!("{}/", state.base_path),
+                get({
+                    let target = state.base_path.clone();
+                    move || async move { Redirect::permanent(&target) }
+                }),
+            )
             .nest(&state.base_path, inner_router)
     };
 
-    final_router.layer(axum::extract::DefaultBodyLimit::disable())
+    final_router.layer(axum::extract::DefaultBodyLimit::max(64 * 1024))
 }
 
 async fn spa_index_handler(
@@ -291,24 +300,5 @@ fn header_value(headers: &HeaderMap, name: &str) -> Option<String> {
 }
 
 fn normalize_base_path(input: &str) -> Option<String> {
-    let trimmed = input.trim();
-    if trimmed.is_empty() {
-        return Some("/".to_string());
-    }
-
-    let mut path = if trimmed.starts_with('/') {
-        trimmed.to_string()
-    } else {
-        format!("/{trimmed}")
-    };
-
-    while path.len() > 1 && path.ends_with('/') {
-        path.pop();
-    }
-
-    if path.contains('?') || path.contains('#') {
-        return None;
-    }
-
-    Some(path)
+    crate::config::normalize_base_path(input).ok()
 }

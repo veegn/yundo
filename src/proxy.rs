@@ -5,6 +5,7 @@ use crate::{
         is_forbidden_hostname, resolve_file_name, AppState, ProxyQuery, ALLOWED_HEADERS,
     },
     history::record_download,
+    storage::{remove_accounted_file, PendingFile},
 };
 use axum::{
     body::Body,
@@ -16,11 +17,7 @@ use bytes::Bytes;
 use futures_util::StreamExt;
 use sha2::{Digest, Sha256};
 use std::{collections::HashMap, sync::Arc};
-use tokio::{
-    fs::{self, File},
-    io::AsyncWriteExt,
-    sync::mpsc,
-};
+use tokio::{fs, sync::mpsc};
 use tokio_stream::wrappers::ReceiverStream;
 use url::Url;
 
@@ -92,6 +89,20 @@ pub(crate) async fn proxy_handler(
     let data_path = state.cache_dir.join(format!("{hash}.data"));
     let meta_path = state.cache_dir.join(format!("{hash}.meta"));
 
+    let mut operation = Some(state.cache_usage.operations.clone().read_owned().await);
+    let cache_guard = if is_range_request {
+        operation.take();
+        None
+    } else {
+        Some(
+            state
+                .cache_usage
+                .key_lock(&format!("proxy:{hash}"))
+                .write_owned()
+                .await,
+        )
+    };
+
     if !is_range_request {
         tracing::info!(target_url = %target_url, cache_key = %hash, "checking proxy cache");
         if let Some(response) = try_serve_from_cache(
@@ -106,6 +117,19 @@ pub(crate) async fn proxy_handler(
             return response;
         }
     }
+
+    // A miss can leave an old data file behind when metadata is unreadable.
+    let cache_writable = if !is_range_request {
+        let removed = remove_accounted_file(&data_path, &state.cache_usage)
+            .await
+            .is_ok();
+        if removed {
+            let _ = fs::remove_file(&meta_path).await;
+        }
+        removed
+    } else {
+        false
+    };
 
     let mut upstream_request = state.client.get(&target_url);
     if let Some(range) = req_headers.get("range") {
@@ -181,7 +205,8 @@ pub(crate) async fn proxy_handler(
         headers: meta_headers,
         status: status.as_u16(),
     };
-    let should_cache = status.is_success() && !is_range_request;
+    let should_cache = status == axum::http::StatusCode::OK && cache_writable;
+    let expected_length = upstream_response.content_length();
     if status.is_success() {
         record_download(
             state.db.clone(),
@@ -200,89 +225,71 @@ pub(crate) async fn proxy_handler(
     let stream_target_url = target_url.clone();
 
     tokio::spawn(async move {
-        let mut temp_file = if should_cache {
-            File::create(&tmp_data_path).await.ok()
+        let _cache_guard = cache_guard;
+        let mut pending = if should_cache {
+            PendingFile::create(
+                tmp_data_path.clone(),
+                state.cache_usage.clone(),
+                state.max_cache_size,
+                Arc::new(operation.take().unwrap()),
+            )
+            .await
+            .ok()
         } else {
             None
         };
+        drop(operation);
         let mut success = true;
         let mut bytes_streamed = 0_u64;
-
         while let Some(chunk_result) = stream.next().await {
             match chunk_result {
                 Ok(chunk) => {
                     bytes_streamed += chunk.len() as u64;
-                    if let Some(file) = temp_file.as_mut() {
-                        if let Err(err) = file.write_all(&chunk).await {
-                            tracing::error!(
-                                target_url = %stream_target_url,
-                                cache_key = %cache_key,
-                                error = %err,
-                                "failed to write proxy cache chunk"
-                            );
-                            success = false;
-                            break;
+                    if let Some(file) = pending.as_mut() {
+                        if let Err(error) = file.write_all(&chunk).await {
+                            tracing::debug!(%error, cache_key = %cache_key, "cache write skipped; continuing download");
+                            pending.take().unwrap().discard().await;
                         }
                     }
-
                     if tx.send(Ok(chunk)).await.is_err() {
                         success = false;
                         break;
                     }
                 }
-                Err(err) => {
-                    let _ = tx.send(Err(std::io::Error::other(err.to_string()))).await;
+                Err(error) => {
+                    tracing::warn!(target_url = %stream_target_url, %error, "proxy upstream stream failed");
+                    let _ = tx.send(Err(std::io::Error::other(error.to_string()))).await;
                     ::metrics::counter!("yundo_proxy_upstream_errors_total", "proxy" => "download_stream").increment(1);
-                    tracing::warn!(
-                        target_url = %stream_target_url,
-                        cache_key = %cache_key,
-                        error = %err,
-                        "proxy upstream stream failed"
-                    );
                     success = false;
                     break;
                 }
             }
         }
-
-        if let Some(file) = temp_file.as_mut() {
-            let _ = file.flush().await;
-        }
-
-        if should_cache && success {
-            if let Ok(meta_bytes) = serde_json::to_vec(&cache_meta) {
-                if fs::write(&tmp_meta_path, meta_bytes).await.is_ok()
-                    && fs::rename(&tmp_data_path, &data_path).await.is_ok()
-                    && fs::rename(&tmp_meta_path, &meta_path).await.is_ok()
-                {
-                    tracing::info!(
-                        target_url = %stream_target_url,
-                        cache_key = %cache_key,
-                        bytes_streamed,
-                        "proxy response cached"
-                    );
-                    return;
+        success &= expected_length.is_none_or(|length| length == bytes_streamed);
+        let mut cached = false;
+        if let Some(mut file) = pending {
+            let finalized = if success {
+                if let Ok(meta_bytes) = serde_json::to_vec(&cache_meta) {
+                    fs::write(&tmp_meta_path, meta_bytes).await.is_ok()
+                        && file.rename(&data_path).await.is_ok()
+                        && fs::rename(&tmp_meta_path, &meta_path).await.is_ok()
+                } else {
+                    false
                 }
+            } else {
+                false
+            };
+            if finalized {
+                file.commit();
+                cached = true;
+                tracing::info!(target_url = %stream_target_url, cache_key = %cache_key, bytes_streamed, "proxy response cached");
+            } else {
+                file.discard().await;
+                let _ = fs::remove_file(&tmp_meta_path).await;
             }
-            tracing::warn!(
-                target_url = %stream_target_url,
-                cache_key = %cache_key,
-                "failed to finalize proxy cache files"
-            );
         }
-
-        let _ = fs::remove_file(&tmp_data_path).await;
-        let _ = fs::remove_file(&tmp_meta_path).await;
-        tracing::info!(
-            target_url = %stream_target_url,
-            cache_key = %cache_key,
-            bytes_streamed,
-            cached = false,
-            success,
-            "proxy stream finished"
-        );
+        tracing::info!(target_url = %stream_target_url, cache_key = %cache_key, bytes_streamed, cached, success, "proxy stream finished");
     });
-
     (
         status,
         response_headers,

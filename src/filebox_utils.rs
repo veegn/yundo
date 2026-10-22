@@ -4,24 +4,7 @@ use crate::common::AppState;
 /// Reserve space in the cache for an upload.
 /// Returns Ok(()) if space was successfully reserved, Err otherwise.
 pub fn try_reserve_space(state: &AppState, bytes: u64) -> Result<(), &'static str> {
-    let current = state.cache_usage.get();
-
-    // Check if adding this would exceed the limit
-    if current + bytes > state.max_cache_size {
-        return Err("Storage space insufficient");
-    }
-
-    // Atomically reserve the space
-    state.cache_usage.add(bytes);
-
-    // Double-check after reservation (race condition protection)
-    if state.cache_usage.get() > state.max_cache_size {
-        // Rollback the reservation
-        state.cache_usage.sub(bytes);
-        return Err("Storage space insufficient");
-    }
-
-    Ok(())
+    state.cache_usage.try_reserve(bytes, state.max_cache_size)
 }
 
 /// Release previously reserved space.

@@ -1,7 +1,9 @@
 use crate::{
-    common::{is_forbidden_hostname, resolve_file_name, AppState},
-    constants::FILEBOX_EXPIRATION_DAYS,
-    filebox_utils::{check_file_size_limit, release_space, try_reserve_space, validate_upload_id},
+    common::{resolve_file_name, AppState},
+    constants::{FILEBOX_EXPIRATION_DAYS, MAX_UPLOAD_CHUNK_BYTES},
+    errors::AppError,
+    filebox_utils::{check_file_size_limit, validate_upload_id},
+    storage::{remove_accounted_directory, remove_accounted_file, PendingFile},
 };
 use axum::{
     body::Body,
@@ -18,10 +20,11 @@ use std::sync::{
 };
 use std::time::SystemTime;
 use tokio::fs::{self, File};
-use tokio::io::{self, AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
+use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio_util::io::ReaderStream;
 use url::Url;
 
+type ApiResult = Result<Json<serde_json::Value>, AppError>;
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 
 fn generate_unique_id() -> String {
@@ -81,6 +84,8 @@ pub async fn list_filebox_handler(State(state): State<Arc<AppState>>) -> impl In
         Json(serde_json::json!({
             "total_space": state.max_cache_size,
             "used_space": used_space,
+            "auth_required": state.api_key.is_some(),
+            "max_file_size": state.max_file_size,
             "files": files,
         })),
     )
@@ -92,328 +97,138 @@ pub struct RemoteUploadPayload {
     pub url: String,
 }
 
+fn check_size(state: &AppState, size: u64) -> Result<(), AppError> {
+    check_file_size_limit(state, size).map_err(|_| AppError::FileTooLarge)
+}
+
+async fn publish_file(
+    state: &AppState,
+    pending: &mut PendingFile,
+    id: &str,
+    name: &str,
+) -> Result<(), AppError> {
+    pending
+        .rename(&state.cache_dir.join("filebox").join(id))
+        .await?;
+    sqlx::query("INSERT INTO filebox_files (id, file_name, file_size, expires_at) VALUES (?, ?, ?, datetime('now', ?))")
+        .bind(id).bind(name).bind(pending.size() as i64).bind(format!("+{FILEBOX_EXPIRATION_DAYS} days"))
+        .execute(&state.db).await?;
+    Ok(())
+}
+
+async fn finish_pending(pending: Option<PendingFile>, result: ApiResult) -> ApiResult {
+    if let Some(file) = pending {
+        if result.is_ok() {
+            file.commit();
+        } else {
+            file.discard().await;
+        }
+    }
+    result
+}
+
 pub async fn remote_upload_filebox_handler(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<RemoteUploadPayload>,
-) -> impl IntoResponse {
-    let target_url = payload.url;
-    let parsed_url = match Url::parse(&target_url) {
-        Ok(url) => url,
-        Err(_) => return (StatusCode::BAD_REQUEST, "invalid URL format").into_response(),
-    };
-
-    if !matches!(parsed_url.scheme(), "http" | "https") {
-        return (
-            StatusCode::BAD_REQUEST,
-            "only HTTP and HTTPS URLs are supported",
-        )
-            .into_response();
-    }
-
-    let host = parsed_url
-        .host_str()
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    if is_forbidden_hostname(&host) {
-        return (
-            StatusCode::FORBIDDEN,
-            "access to local or private networks is forbidden",
-        )
-            .into_response();
-    }
-
-    let _initial_combined_used =
-        crate::cache::get_combined_used_size(&state.cache_dir, &state.db, &state).await;
-
-    let upstream_request = state
+) -> ApiResult {
+    let parsed_url = Url::parse(&payload.url).map_err(|_| AppError::InvalidUrl)?;
+    crate::ssrf::validate_url_host(&parsed_url).map_err(|_| {
+        if matches!(parsed_url.scheme(), "http" | "https") {
+            AppError::ForbiddenHost
+        } else {
+            AppError::UnsupportedScheme
+        }
+    })?;
+    let response = state
         .client
-        .get(&target_url)
-        .header("User-Agent", "precision-proxy/1.0");
-
-    let upstream_response = match upstream_request.send().await {
-        Ok(response) => response,
-        Err(err) => {
-            tracing::error!("remote upload request failed for {target_url}: {err}");
-            return (StatusCode::BAD_GATEWAY, "failed to reach target server").into_response();
-        }
-    };
-
-    let status = upstream_response.status();
-    if !status.is_success() {
-        return (StatusCode::BAD_GATEWAY, "upstream server returned error").into_response();
+        .get(parsed_url.clone())
+        .header("User-Agent", "precision-proxy/1.0")
+        .send()
+        .await
+        .map_err(|_| AppError::UpstreamConnectionFailed)?;
+    if !response.status().is_success() {
+        return Err(AppError::UpstreamError);
     }
-
-    // Check Content-Length if available
-    let content_length = upstream_response
-        .headers()
-        .get(header::CONTENT_LENGTH)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.parse::<u64>().ok());
-
-    if let Some(size) = content_length {
-        if let Err(msg) = check_file_size_limit(&state, size) {
-            return (StatusCode::PAYLOAD_TOO_LARGE, msg).into_response();
-        }
-
-        // Try to reserve space upfront
-        if let Err(msg) = try_reserve_space(&state, size) {
-            return (StatusCode::PAYLOAD_TOO_LARGE, msg).into_response();
-        }
+    if let Some(length) = response.content_length() {
+        check_size(&state, length)?;
     }
-
-    let final_url = upstream_response.url().clone();
-    let mut response_headers = HeaderMap::new();
-    for (name, value) in upstream_response.headers() {
-        let header_name = name.as_str().to_ascii_lowercase();
-        if crate::common::ALLOWED_HEADERS.contains(&header_name.as_str()) {
-            response_headers.insert(name.clone(), value.clone());
-        }
-    }
-
-    let file_name = resolve_file_name(&parsed_url, Some(&final_url), &response_headers);
+    let name = resolve_file_name(&parsed_url, Some(response.url()), response.headers());
     let id = generate_unique_id();
-    let file_path = state.cache_dir.join("filebox").join(&id);
-
-    let mut file = match File::create(&file_path).await {
-        Ok(f) => f,
-        Err(err) => {
-            tracing::error!("failed to create file on disk: {err}");
-            return (StatusCode::INTERNAL_SERVER_ERROR, "Disk error").into_response();
-        }
-    };
-
-    let mut size = 0_u64;
-    let mut quota_exceeded = false;
-    let mut stream = upstream_response.bytes_stream();
-
-    while let Some(chunk_result) = stream.next().await {
-        match chunk_result {
-            Ok(chunk) => {
-                let chunk_size = chunk.len() as u64;
-
-                // Check file size limit
-                if state.max_file_size > 0 && size + chunk_size > state.max_file_size {
-                    quota_exceeded = true;
-                    break;
-                }
-
-                // If we didn't reserve upfront, check incrementally
-                if content_length.is_none() {
-                    if let Err(_) = try_reserve_space(&state, chunk_size) {
-                        quota_exceeded = true;
-                        break;
-                    }
-                }
-
-                if let Err(err) = file.write_all(&chunk).await {
-                    tracing::error!("failed to write chunk to disk during remote upload: {err}");
-                    let _ = fs::remove_file(&file_path).await;
-
-                    // Release reserved space
-                    if let Some(reserved) = content_length {
-                        release_space(&state, reserved);
-                    } else {
-                        release_space(&state, size);
-                    }
-
-                    return (StatusCode::INTERNAL_SERVER_ERROR, "Disk write error").into_response();
-                }
-                size += chunk_size;
-            }
-            Err(err) => {
-                tracing::error!("failed to read chunk from upstream during remote upload: {err}");
-                let _ = fs::remove_file(&file_path).await;
-
-                // Release reserved space
-                if let Some(reserved) = content_length {
-                    release_space(&state, reserved);
-                } else {
-                    release_space(&state, size);
-                }
-
-                return (
-                    StatusCode::BAD_GATEWAY,
-                    "network error reading from upstream",
-                )
-                    .into_response();
-            }
-        }
-    }
-
-    if quota_exceeded {
-        let _ = fs::remove_file(&file_path).await;
-
-        // Release reserved space
-        if let Some(reserved) = content_length {
-            release_space(&state, reserved);
-        } else {
-            release_space(&state, size);
-        }
-
-        return (
-            StatusCode::PAYLOAD_TOO_LARGE,
-            "Storage space insufficient or file too large",
-        )
-            .into_response();
-    }
-
-    if size == 0 {
-        let _ = fs::remove_file(&file_path).await;
-        if let Some(reserved) = content_length {
-            release_space(&state, reserved);
-        }
-        return (StatusCode::BAD_REQUEST, "File size is 0").into_response();
-    }
-
-    // Adjust reservation if actual size differs from Content-Length
-    if let Some(reserved) = content_length {
-        if size < reserved {
-            release_space(&state, reserved - size);
-        } else if size > reserved {
-            // This shouldn't happen, but handle it
-            state.cache_usage.add(size - reserved);
-        }
-    }
-
-    if let Err(err) = sqlx::query(&format!(
-        "INSERT INTO filebox_files (id, file_name, file_size, expires_at)
-             VALUES (?, ?, ?, datetime('now', '+{} days'))",
-        FILEBOX_EXPIRATION_DAYS
-    ))
-    .bind(&id)
-    .bind(&file_name)
-    .bind(size as i64)
-    .execute(&state.db)
-    .await
-    {
-        tracing::error!("failed to insert remote upload metadata to DB: {err}");
-        let _ = fs::remove_file(&file_path).await;
-
-        // Release reserved space
-        if let Some(reserved) = content_length {
-            release_space(&state, reserved);
-        } else {
-            release_space(&state, size);
-        }
-
-        return (StatusCode::INTERNAL_SERVER_ERROR, "Database record error").into_response();
-    }
-
-    (
-        StatusCode::OK,
-        Json(serde_json::json!({
-            "success": true,
-            "file": {
-                "id": id,
-                "file_name": file_name,
-                "file_size": size,
-            }
-        })),
+    let operation = Arc::new(state.cache_usage.operations.clone().read_owned().await);
+    let mut pending = PendingFile::create(
+        state.cache_dir.join("filebox").join(format!("{id}.tmp")),
+        state.cache_usage.clone(),
+        state.max_cache_size,
+        operation.clone(),
     )
-        .into_response()
+    .await?;
+    let result = async {
+        let mut stream = response.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|_| AppError::UpstreamError)?;
+            check_size(&state, pending.size().checked_add(chunk.len() as u64).ok_or(AppError::FileTooLarge)?)?;
+            pending.write_all(&chunk).await?;
+        }
+        if pending.size() == 0 { return Err(AppError::NoValidFiles); }
+        publish_file(&state, &mut pending, &id, &name).await?;
+        Ok(Json(serde_json::json!({"success":true,"file":{"id":id,"file_name":name,"file_size":pending.size()}})))
+    }.await;
+    finish_pending(Some(pending), result).await
 }
 
 pub async fn upload_filebox_handler(
     State(state): State<Arc<AppState>>,
     mut multipart: Multipart,
-) -> impl IntoResponse {
-    let mut uploaded_files = Vec::new();
-
-    while let Ok(Some(mut field)) = multipart.next_field().await {
-        let file_name = field.file_name().unwrap_or("file").to_string();
-        let id = generate_unique_id();
-        let file_path = state.cache_dir.join("filebox").join(&id);
-
-        let mut file = match File::create(&file_path).await {
-            Ok(f) => f,
-            Err(err) => {
-                tracing::error!("failed to create file on disk: {err}");
-                return (StatusCode::INTERNAL_SERVER_ERROR, "Disk error").into_response();
-            }
-        };
-
-        let mut size = 0_u64;
-        let mut quota_exceeded = false;
-        let mut reserved = 0_u64;
-
-        while let Ok(Some(chunk)) = field.chunk().await {
-            let chunk_size = chunk.len() as u64;
-
-            // Check file size limit
-            if state.max_file_size > 0 && size + chunk_size > state.max_file_size {
-                quota_exceeded = true;
-                break;
-            }
-
-            // Try to reserve space for this chunk
-            if let Err(_) = try_reserve_space(&state, chunk_size) {
-                quota_exceeded = true;
-                break;
-            }
-
-            reserved += chunk_size;
-
-            if let Err(err) = file.write_all(&chunk).await {
-                tracing::error!("failed to write chunk to disk: {err}");
-                let _ = fs::remove_file(&file_path).await;
-                release_space(&state, reserved);
-                return (StatusCode::INTERNAL_SERVER_ERROR, "Disk write error").into_response();
-            }
-            size += chunk_size;
-        }
-
-        if quota_exceeded {
-            let _ = fs::remove_file(&file_path).await;
-            release_space(&state, reserved);
-            return (
-                StatusCode::PAYLOAD_TOO_LARGE,
-                "Storage space insufficient or file too large",
-            )
-                .into_response();
-        }
-
-        if size == 0 {
-            let _ = fs::remove_file(&file_path).await;
-            release_space(&state, reserved);
-            continue;
-        }
-
-        if let Err(err) = sqlx::query(&format!(
-            "INSERT INTO filebox_files (id, file_name, file_size, expires_at)
-                 VALUES (?, ?, ?, datetime('now', '+{} days'))",
-            FILEBOX_EXPIRATION_DAYS
-        ))
-        .bind(&id)
-        .bind(&file_name)
-        .bind(size as i64)
-        .execute(&state.db)
+) -> ApiResult {
+    let mut uploaded = Vec::new();
+    while let Some(mut field) = multipart
+        .next_field()
         .await
-        {
-            tracing::error!("failed to insert upload metadata to DB: {err}");
-            let _ = fs::remove_file(&file_path).await;
-            release_space(&state, reserved);
-            return (StatusCode::INTERNAL_SERVER_ERROR, "Database record error").into_response();
+        .map_err(|_| AppError::RequestBodyReadFailed)?
+    {
+        let Some(name) = field.file_name().map(str::to_string) else {
+            continue;
+        };
+        let id = generate_unique_id();
+        let operation = Arc::new(state.cache_usage.operations.clone().read_owned().await);
+        let mut pending = PendingFile::create(
+            state.cache_dir.join("filebox").join(format!("{id}.tmp")),
+            state.cache_usage.clone(),
+            state.max_cache_size,
+            operation.clone(),
+        )
+        .await?;
+        let result = async {
+            while let Some(chunk) = field
+                .chunk()
+                .await
+                .map_err(|_| AppError::RequestBodyReadFailed)?
+            {
+                check_size(
+                    &state,
+                    pending
+                        .size()
+                        .checked_add(chunk.len() as u64)
+                        .ok_or(AppError::FileTooLarge)?,
+                )?;
+                pending.write_all(&chunk).await?;
+            }
+            if pending.size() == 0 {
+                return Err(AppError::NoValidFiles);
+            }
+            publish_file(&state, &mut pending, &id, &name).await?;
+            Ok(Json(
+                serde_json::json!({"id":id,"file_name":name,"file_size":pending.size()}),
+            ))
         }
-
-        uploaded_files.push(serde_json::json!({
-            "id": id,
-            "file_name": file_name,
-            "file_size": size,
-        }));
+        .await;
+        let Json(item) = finish_pending(Some(pending), result).await?;
+        uploaded.push(item);
     }
-
-    if uploaded_files.is_empty() {
-        return (StatusCode::BAD_REQUEST, "没有检测到有效文件").into_response();
+    if uploaded.is_empty() {
+        return Err(AppError::NoValidFiles);
     }
-
-    (
-        StatusCode::OK,
-        Json(serde_json::json!({
-            "success": true,
-            "files": uploaded_files,
-        })),
-    )
-        .into_response()
+    Ok(Json(serde_json::json!({"success":true,"files":uploaded})))
 }
 
 fn parse_range(range_header: &str, file_size: u64) -> Option<(u64, u64)> {
@@ -573,27 +388,31 @@ pub async fn download_filebox_handler(
 pub async fn delete_filebox_handler(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(id): axum::extract::Path<String>,
-) -> impl IntoResponse {
-    let result = match sqlx::query("DELETE FROM filebox_files WHERE id = ?")
+) -> ApiResult {
+    validate_upload_id(&id).map_err(|_| AppError::InvalidUploadId)?;
+    let _operation = state.cache_usage.operations.read().await;
+    let _file_lock = state
+        .cache_usage
+        .key_lock(&format!("file:{id}"))
+        .write_owned()
+        .await;
+    let exists = sqlx::query("SELECT id FROM filebox_files WHERE id = ?")
+        .bind(&id)
+        .fetch_optional(&state.db)
+        .await?;
+    if exists.is_none() {
+        return Err(AppError::FileNotFound);
+    }
+    remove_accounted_file(
+        &state.cache_dir.join("filebox").join(&id),
+        &state.cache_usage,
+    )
+    .await?;
+    sqlx::query("DELETE FROM filebox_files WHERE id = ?")
         .bind(&id)
         .execute(&state.db)
-        .await
-    {
-        Ok(res) => res.rows_affected(),
-        Err(err) => {
-            tracing::error!("failed to delete file metadata: {err}");
-            return (StatusCode::INTERNAL_SERVER_ERROR, "Database error").into_response();
-        }
-    };
-
-    if result == 0 {
-        return (StatusCode::NOT_FOUND, "文件不存在").into_response();
-    }
-
-    let file_path = state.cache_dir.join("filebox").join(&id);
-    let _ = fs::remove_file(&file_path).await;
-
-    (StatusCode::OK, Json(serde_json::json!({ "success": true }))).into_response()
+        .await?;
+    Ok(Json(serde_json::json!({"success":true})))
 }
 
 #[derive(serde::Deserialize)]
@@ -603,177 +422,179 @@ pub struct UploadCompletePayload {
     pub total_chunks: usize,
 }
 
+async fn small_field(mut field: axum::extract::multipart::Field<'_>) -> Result<String, AppError> {
+    let mut bytes = Vec::new();
+    while let Some(chunk) = field
+        .chunk()
+        .await
+        .map_err(|_| AppError::RequestBodyReadFailed)?
+    {
+        if bytes.len() + chunk.len() > 256 {
+            return Err(AppError::InvalidUpload("metadata field too large"));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    String::from_utf8(bytes).map_err(|_| AppError::InvalidUpload("metadata must be UTF-8"))
+}
+
 pub async fn upload_chunk_handler(
     State(state): State<Arc<AppState>>,
     mut multipart: Multipart,
-) -> impl IntoResponse {
-    let mut upload_id = String::new();
-    let mut chunk_index = 0_usize;
-    let mut chunk_data = Vec::new();
-
-    while let Ok(Some(field)) = multipart.next_field().await {
-        match field.name() {
-            Some("upload_id") => upload_id = field.text().await.unwrap_or_default(),
-            Some("chunk_index") => {
-                chunk_index = field.text().await.unwrap_or_default().parse().unwrap_or(0)
+) -> ApiResult {
+    let operation = Arc::new(state.cache_usage.operations.clone().read_owned().await);
+    let mut pending: Option<PendingFile> = None;
+    let result = async {
+        let mut upload_id = None;
+        let mut chunk_index = None;
+        while let Some(mut field) = multipart
+            .next_field()
+            .await
+            .map_err(|_| AppError::RequestBodyReadFailed)?
+        {
+            match field.name() {
+                Some("upload_id") if upload_id.is_none() => {
+                    let id = small_field(field).await?;
+                    validate_upload_id(&id).map_err(|_| AppError::InvalidUploadId)?;
+                    upload_id = Some(id);
+                }
+                Some("chunk_index") if chunk_index.is_none() => {
+                    chunk_index = Some(
+                        small_field(field)
+                            .await?
+                            .parse::<usize>()
+                            .map_err(|_| AppError::InvalidUpload("invalid chunk index"))?,
+                    );
+                }
+                Some("file") if pending.is_none() => {
+                    let staged = state
+                        .cache_dir
+                        .join("filebox_tmp")
+                        .join(format!("{}.tmp", generate_unique_id()));
+                    pending = Some(
+                        PendingFile::create(
+                            staged,
+                            state.cache_usage.clone(),
+                            state.max_cache_size,
+                            operation.clone(),
+                        )
+                        .await?,
+                    );
+                    let file = pending.as_mut().unwrap();
+                    while let Some(chunk) = field
+                        .chunk()
+                        .await
+                        .map_err(|_| AppError::RequestBodyReadFailed)?
+                    {
+                        let next_size = file
+                            .size()
+                            .checked_add(chunk.len() as u64)
+                            .ok_or(AppError::FileTooLarge)?;
+                        if next_size > MAX_UPLOAD_CHUNK_BYTES {
+                            return Err(AppError::FileTooLarge);
+                        }
+                        check_size(&state, next_size)?;
+                        file.write_all(&chunk).await?;
+                    }
+                }
+                _ => return Err(AppError::InvalidUpload("unexpected or duplicate field")),
             }
-            Some("file") => chunk_data = field.bytes().await.unwrap_or_default().to_vec(),
-            _ => {}
         }
+        let id = upload_id.ok_or(AppError::InvalidUpload("missing upload ID"))?;
+        let index = chunk_index.ok_or(AppError::InvalidUpload("missing chunk index"))?;
+        let file = pending.as_mut().ok_or(AppError::NoValidFiles)?;
+        if file.size() == 0 {
+            return Err(AppError::NoValidFiles);
+        }
+        // Only validated identifiers ever become part of a filesystem path.
+        let _upload_lock = state
+            .cache_usage
+            .key_lock(&format!("upload:{id}"))
+            .read_owned()
+            .await;
+        let _chunk_lock = state
+            .cache_usage
+            .key_lock(&format!("chunk:{id}:{index}"))
+            .write_owned()
+            .await;
+        let directory = state.cache_dir.join("filebox_tmp").join(&id);
+        fs::create_dir_all(&directory).await?;
+        let destination = directory.join(index.to_string());
+        if fs::try_exists(&destination).await? {
+            return Err(AppError::UploadConflict);
+        }
+        file.rename(&destination).await?;
+        ::metrics::counter!("yundo_filebox_upload_chunks_total").increment(1);
+        ::metrics::histogram!("yundo_filebox_upload_chunk_bytes").record(file.size() as f64);
+        Ok(Json(serde_json::json!({"success":true})))
     }
-
-    if upload_id.is_empty() || chunk_data.is_empty() {
-        return (StatusCode::BAD_REQUEST, "Missing chunk metadata").into_response();
-    }
-
-    let chunk_size = chunk_data.len() as u64;
-
-    // Check file size limit for this chunk
-    if let Err(msg) = check_file_size_limit(&state, chunk_size) {
-        return (StatusCode::PAYLOAD_TOO_LARGE, msg).into_response();
-    }
-
-    // Try to reserve space for this chunk
-    if let Err(msg) = try_reserve_space(&state, chunk_size) {
-        return (StatusCode::PAYLOAD_TOO_LARGE, msg).into_response();
-    }
-
-    let chunk_dir = state.cache_dir.join("filebox_tmp").join(&upload_id);
-    if let Err(err) = fs::create_dir_all(&chunk_dir).await {
-        tracing::error!("failed to create chunk directory: {err}");
-        release_space(&state, chunk_size);
-        return (StatusCode::INTERNAL_SERVER_ERROR, "Disk error").into_response();
-    }
-
-    let chunk_path = chunk_dir.join(chunk_index.to_string());
-    if let Err(err) = fs::write(&chunk_path, chunk_data).await {
-        tracing::error!("failed to write chunk to disk: {err}");
-        release_space(&state, chunk_size);
-        return (StatusCode::INTERNAL_SERVER_ERROR, "Disk write error").into_response();
-    }
-
-    ::metrics::counter!("yundo_filebox_upload_chunks_total").increment(1);
-    ::metrics::histogram!("yundo_filebox_upload_chunk_bytes").record(chunk_size as f64);
-
-    (StatusCode::OK, Json(serde_json::json!({ "success": true }))).into_response()
+    .await;
+    finish_pending(pending, result).await
 }
 
 pub async fn upload_complete_handler(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<UploadCompletePayload>,
-) -> impl IntoResponse {
-    if let Err(msg) = validate_upload_id(&payload.upload_id) {
-        ::metrics::counter!("yundo_filebox_upload_merges_total", "result" => "invalid_upload_id")
-            .increment(1);
-        return (StatusCode::BAD_REQUEST, msg).into_response();
-    }
+) -> ApiResult {
+    let result = complete_upload(state, payload).await;
+    ::metrics::counter!("yundo_filebox_upload_merges_total", "result" => if result.is_ok() { "success" } else { "error" }).increment(1);
+    result
+}
 
+async fn complete_upload(state: Arc<AppState>, payload: UploadCompletePayload) -> ApiResult {
+    validate_upload_id(&payload.upload_id).map_err(|_| AppError::InvalidUploadId)?;
+    if payload.total_chunks == 0 || payload.file_name.is_empty() {
+        return Err(AppError::InvalidUpload("missing file metadata"));
+    }
+    let operation = Arc::new(state.cache_usage.operations.clone().read_owned().await);
+    let _upload_lock = state
+        .cache_usage
+        .key_lock(&format!("upload:{}", payload.upload_id))
+        .write_owned()
+        .await;
+    let directory = state.cache_dir.join("filebox_tmp").join(&payload.upload_id);
+    let mut total = 0_u64;
+    for index in 0..payload.total_chunks {
+        let size = fs::metadata(directory.join(index.to_string()))
+            .await
+            .map_err(|_| AppError::MissingChunk(index))?
+            .len();
+        if size == 0 {
+            return Err(AppError::InvalidUpload("empty chunk"));
+        }
+        total = total.checked_add(size).ok_or(AppError::FileTooLarge)?;
+        check_size(&state, total)?;
+    }
+    // Merging temporarily holds both the source chunks and the assembled file.
+    if total > state.max_cache_size.saturating_sub(state.cache_usage.get()) {
+        return Err(AppError::StorageFull);
+    }
     let id = generate_unique_id();
-    let file_path = state.cache_dir.join("filebox").join(&id);
-    let chunk_dir = state.cache_dir.join("filebox_tmp").join(&payload.upload_id);
-
-    if !chunk_dir.exists() {
-        ::metrics::counter!("yundo_filebox_upload_merges_total", "result" => "missing_chunks")
-            .increment(1);
-        return (StatusCode::BAD_REQUEST, "No chunks found").into_response();
-    }
-
-    let mut final_file = match File::create(&file_path).await {
-        Ok(f) => f,
-        Err(err) => {
-            tracing::error!("failed to create final file: {err}");
-            ::metrics::counter!("yundo_filebox_upload_merges_total", "result" => "disk_error")
-                .increment(1);
-            return (StatusCode::INTERNAL_SERVER_ERROR, "Disk error").into_response();
-        }
-    };
-
-    let mut total_size = 0_u64;
-
-    for i in 0..payload.total_chunks {
-        let chunk_path = chunk_dir.join(i.to_string());
-        let mut chunk_file = match File::open(&chunk_path).await {
-            Ok(file) => file,
-            Err(_) => {
-                let _ = fs::remove_file(&file_path).await;
-                ::metrics::counter!("yundo_filebox_upload_merges_total", "result" => "missing_chunk")
-                    .increment(1);
-                return (StatusCode::BAD_REQUEST, format!("Missing chunk: {}", i)).into_response();
-            }
-        };
-
-        let copied = match io::copy(&mut chunk_file, &mut final_file).await {
-            Ok(bytes) => bytes,
-            Err(err) => {
-                tracing::error!("failed to merge upload chunk: {err}");
-                let _ = fs::remove_file(&file_path).await;
-                ::metrics::counter!("yundo_filebox_upload_merges_total", "result" => "disk_error")
-                    .increment(1);
-                return (StatusCode::INTERNAL_SERVER_ERROR, "Disk write error").into_response();
-            }
-        };
-
-        if copied == 0 {
-            let _ = fs::remove_file(&file_path).await;
-            ::metrics::counter!("yundo_filebox_upload_merges_total", "result" => "empty_chunk")
-                .increment(1);
-            return (StatusCode::BAD_REQUEST, format!("Empty chunk: {}", i)).into_response();
-        }
-
-        total_size += copied;
-    }
-
-    if let Err(err) = final_file.flush().await {
-        tracing::error!("failed to flush merged file: {err}");
-        let _ = fs::remove_file(&file_path).await;
-        ::metrics::counter!("yundo_filebox_upload_merges_total", "result" => "disk_error")
-            .increment(1);
-        return (StatusCode::INTERNAL_SERVER_ERROR, "Disk write error").into_response();
-    }
-
-    // Cleanup tmp dir
-    let _ = fs::remove_dir_all(&chunk_dir).await;
-
-    if total_size == 0 {
-        let _ = fs::remove_file(&file_path).await;
-        ::metrics::counter!("yundo_filebox_upload_merges_total", "result" => "empty_file")
-            .increment(1);
-        return (StatusCode::BAD_REQUEST, "合并文件大小为 0").into_response();
-    }
-
-    if let Err(err) = sqlx::query(
-        "INSERT INTO filebox_files (id, file_name, file_size, expires_at)
-         VALUES (?, ?, ?, datetime('now', '+7 days'))",
+    let mut pending = PendingFile::create(
+        state.cache_dir.join("filebox").join(format!("{id}.tmp")),
+        state.cache_usage.clone(),
+        state.max_cache_size,
+        operation.clone(),
     )
-    .bind(&id)
-    .bind(&payload.file_name)
-    .bind(total_size as i64)
-    .execute(&state.db)
-    .await
-    {
-        tracing::error!("failed to insert upload metadata to DB: {err}");
-        let _ = fs::remove_file(&file_path).await;
-        release_space(&state, total_size);
-        ::metrics::counter!("yundo_filebox_upload_merges_total", "result" => "database_error")
-            .increment(1);
-        return (StatusCode::INTERNAL_SERVER_ERROR, "Database record error").into_response();
+    .await?;
+    let result = async {
+        let mut buffer = vec![0_u8; 64 * 1024];
+        for index in 0..payload.total_chunks {
+            let mut chunk = File::open(directory.join(index.to_string())).await?;
+            loop {
+                let length = chunk.read(&mut buffer).await?;
+                if length == 0 { break; }
+                pending.write_all(&buffer[..length]).await?;
+            }
+        }
+        publish_file(&state, &mut pending, &id, &payload.file_name).await?;
+        Ok(Json(serde_json::json!({"success":true,"files":[{"id":id,"file_name":payload.file_name,"file_size":pending.size()}]})))
+    }.await;
+    let response = finish_pending(Some(pending), result).await?;
+    if let Err(error) = remove_accounted_directory(&directory, &state.cache_usage).await {
+        tracing::warn!(%error, "merged chunk cleanup failed; retaining quota");
     }
-
-    ::metrics::counter!("yundo_filebox_upload_merges_total", "result" => "success").increment(1);
-    ::metrics::histogram!("yundo_filebox_upload_merged_bytes").record(total_size as f64);
-
-    (
-        StatusCode::OK,
-        Json(serde_json::json!({
-            "success": true,
-            "files": [{
-                "id": id,
-                "file_name": payload.file_name,
-                "file_size": total_size,
-            }]
-        })),
-    )
-        .into_response()
+    ::metrics::histogram!("yundo_filebox_upload_merged_bytes").record(total as f64);
+    Ok(response)
 }
 
 #[derive(serde::Deserialize)]
@@ -784,113 +605,76 @@ pub struct UploadAbortPayload {
 pub async fn upload_abort_handler(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<UploadAbortPayload>,
-) -> impl IntoResponse {
-    // Strict validation to prevent directory traversal
-    if let Err(msg) = validate_upload_id(&payload.upload_id) {
-        return (StatusCode::BAD_REQUEST, msg).into_response();
-    }
-
-    let chunk_dir = state.cache_dir.join("filebox_tmp").join(&payload.upload_id);
-    if chunk_dir.exists() {
-        if let Err(err) = fs::remove_dir_all(&chunk_dir).await {
-            tracing::error!("failed to delete chunk directory for abort: {err}");
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to clean up upload chunks",
-            )
-                .into_response();
-        }
-        tracing::info!(
-            "Successfully aborted upload and cleaned up chunks for ID: {}",
-            payload.upload_id
-        );
-    }
-
-    (StatusCode::OK, Json(serde_json::json!({ "success": true }))).into_response()
+) -> ApiResult {
+    validate_upload_id(&payload.upload_id).map_err(|_| AppError::InvalidUploadId)?;
+    let _operation = state.cache_usage.operations.read().await;
+    let _upload_lock = state
+        .cache_usage
+        .key_lock(&format!("upload:{}", payload.upload_id))
+        .write_owned()
+        .await;
+    remove_accounted_directory(
+        &state.cache_dir.join("filebox_tmp").join(&payload.upload_id),
+        &state.cache_usage,
+    )
+    .await?;
+    Ok(Json(serde_json::json!({"success":true})))
 }
 
 pub fn spawn_filebox_cleanup_task(state: Arc<AppState>) {
-    let shutdown_token = state.shutdown_token.clone();
     tokio::spawn(async move {
         loop {
             tokio::select! {
                 _ = tokio::time::sleep(crate::constants::FILEBOX_CLEANUP_INTERVAL) => {
-                    // 1. Clean up expired files from database and disk
-                    let rows =
-                        sqlx::query("SELECT id FROM filebox_files WHERE expires_at < datetime('now')")
-                            .fetch_all(&state.db)
-                            .await;
-
-                    let expired_ids: Vec<String> = match rows {
-                        Ok(rs) => rs.iter().map(|r| r.get::<String, _>("id")).collect(),
-                        Err(err) => {
-                            tracing::warn!("failed to query expired files: {err}");
-                            continue;
-                        }
-                    };
-
-                    for id in &expired_ids {
-                        let file_path = state.cache_dir.join("filebox").join(id);
-                        if let Ok(metadata) = fs::metadata(&file_path).await {
-                            let file_size = metadata.len();
-                            if fs::remove_file(&file_path).await.is_ok() {
-                                // Release the space from cache usage tracker
-                                state.cache_usage.sub(file_size);
-                                tracing::info!("successfully deleted expired filebox file: {id}");
-                            } else if file_path.exists() {
-                                tracing::warn!(
-                                    "failed to delete expired file from disk: {}",
-                                    file_path.display()
-                                );
-                            }
-                        }
-                    }
-
-                    if !expired_ids.is_empty() {
-                        if let Err(err) =
-                            sqlx::query("DELETE FROM filebox_files WHERE expires_at < datetime('now')")
-                                .execute(&state.db)
-                                .await
-                        {
-                            tracing::warn!("failed to delete expired filebox records from DB: {err}");
-                        }
-                    }
-
-                    // 2. Clean up orphaned/abandoned directories in filebox_tmp older than 24 hours
-                    let filebox_tmp_dir = state.cache_dir.join("filebox_tmp");
-                    if let Ok(mut entries) = fs::read_dir(&filebox_tmp_dir).await {
-                        while let Ok(Some(entry)) = entries.next_entry().await {
-                            if let Ok(metadata) = entry.metadata().await {
-                                if metadata.is_dir() {
-                                    if let Ok(modified) = metadata.modified() {
-                                        if let Ok(elapsed) = modified.elapsed() {
-                                            if elapsed.as_secs() > crate::constants::TEMP_CHUNK_MAX_AGE_SECS {
-                                                let path = entry.path();
-                                                if let Err(err) = fs::remove_dir_all(&path).await {
-                                                    tracing::warn!(
-                                                        "Failed to clean up old temporary chunk dir {}: {}",
-                                                        path.display(),
-                                                        err
-                                                    );
-                                                } else {
-                                                    tracing::info!(
-                                                        "Cleaned up abandoned temporary chunk dir: {}",
-                                                        path.display()
-                                                    );
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
+                    if let Err(error) = cleanup_filebox(&state).await { tracing::warn!(%error, "FileBox cleanup failed"); }
                 }
-                _ = shutdown_token.cancelled() => {
-                    tracing::info!("Filebox cleanup task shutting down");
-                    break;
-                }
+                _ = state.shutdown_token.cancelled() => break,
             }
         }
     });
+}
+
+async fn cleanup_filebox(state: &AppState) -> Result<(), AppError> {
+    let Ok(_idle) = state.cache_usage.operations.try_write() else {
+        return Ok(());
+    };
+    let expired = sqlx::query("SELECT id FROM filebox_files WHERE expires_at < datetime('now')")
+        .fetch_all(&state.db)
+        .await?;
+    for row in expired {
+        let id: String = row.get("id");
+        if let Err(error) = remove_accounted_file(
+            &state.cache_dir.join("filebox").join(&id),
+            &state.cache_usage,
+        )
+        .await
+        {
+            tracing::warn!(%error, %id, "expired file removal failed");
+            continue;
+        }
+        sqlx::query("DELETE FROM filebox_files WHERE id = ?")
+            .bind(id)
+            .execute(&state.db)
+            .await?;
+    }
+    let mut entries = fs::read_dir(state.cache_dir.join("filebox_tmp")).await?;
+    while let Some(entry) = entries.next_entry().await? {
+        let mut modified = entry.metadata().await?.modified()?;
+        if entry.file_type().await?.is_dir() {
+            let mut chunks = fs::read_dir(entry.path()).await?;
+            while let Some(chunk) = chunks.next_entry().await? {
+                modified = modified.max(chunk.metadata().await?.modified()?);
+            }
+        }
+        if modified.elapsed().unwrap_or_default().as_secs()
+            > crate::constants::TEMP_CHUNK_MAX_AGE_SECS
+        {
+            if entry.file_type().await?.is_dir() {
+                remove_accounted_directory(&entry.path(), &state.cache_usage).await?;
+            } else {
+                remove_accounted_file(&entry.path(), &state.cache_usage).await?;
+            }
+        }
+    }
+    Ok(())
 }

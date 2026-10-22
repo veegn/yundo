@@ -99,8 +99,16 @@ pub fn normalize_base_path(input: &str) -> Result<String, String> {
         path.pop();
     }
 
-    if path.contains('?') || path.contains('#') {
-        return Err("base path cannot contain query string or fragment".to_string());
+    if path.starts_with("//")
+        || path.chars().any(|ch| {
+            ch.is_control()
+                || ch.is_whitespace()
+                || matches!(ch, '?' | '#' | '\\' | '"' | '\'' | '<' | '>')
+        })
+    {
+        return Err(
+            "base path must be a local URL path without whitespace or HTML delimiters".to_string(),
+        );
     }
 
     Ok(path)

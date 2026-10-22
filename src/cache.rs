@@ -12,83 +12,69 @@ use std::{path::Path, sync::Arc, time::SystemTime};
 use tokio::fs::{self, File};
 use tokio_util::io::ReaderStream;
 
-use sqlx::Row;
-
-/// Calculate actual disk usage by traversing directories.
-/// This is expensive and should only be called periodically for calibration.
-pub async fn calculate_actual_usage(cache_dir: &Path, db: &sqlx::SqlitePool) -> u64 {
-    // 1. Get active filebox files size from DB
-    let filebox_size = sqlx::query(
-        "SELECT COALESCE(SUM(file_size), 0) AS total_size FROM filebox_files WHERE expires_at >= datetime('now')"
-    )
-    .fetch_one(db)
-    .await
-    .map(|row| row.get::<i64, _>("total_size") as u64)
-    .unwrap_or(0);
-
-    // 2. Calculate directory sizes synchronously in a blocking thread
-    let cache_dir_buf = cache_dir.to_path_buf();
-    let disk_size = tokio::task::spawn_blocking(move || {
-        let mut proxy_cache_size = 0_u64;
-
-        // Calculate proxy cache data files size
-        if let Ok(entries) = std::fs::read_dir(&cache_dir_buf) {
-            for entry in entries.flatten() {
-                if let Ok(metadata) = entry.metadata() {
-                    if metadata.is_file()
-                        && entry.path().extension().is_some_and(|ext| ext == "data")
-                    {
-                        proxy_cache_size += metadata.len();
-                    }
+/// Count payload bytes on disk, including expired/orphaned files and staged writes.
+pub async fn calculate_payload_usage(cache_dir: &Path) -> std::io::Result<u64> {
+    let root = cache_dir.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let mut total = 0_u64;
+        for entry in std::fs::read_dir(&root)? {
+            let entry = entry?;
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if entry.file_type()?.is_file()
+                && (name.ends_with(".data") || name.ends_with(".data.tmp"))
+            {
+                total = total
+                    .checked_add(entry.metadata()?.len())
+                    .ok_or_else(|| std::io::Error::other("storage size overflow"))?;
+            }
+        }
+        let mut directories = vec![root.join("filebox"), root.join("filebox_tmp")];
+        while let Some(directory) = directories.pop() {
+            for entry in std::fs::read_dir(directory)? {
+                let entry = entry?;
+                let kind = entry.file_type()?;
+                if kind.is_dir() {
+                    directories.push(entry.path());
+                } else if kind.is_file() {
+                    total = total
+                        .checked_add(entry.metadata()?.len())
+                        .ok_or_else(|| std::io::Error::other("storage size overflow"))?;
                 }
             }
         }
-
-        // Calculate filebox_tmp size (in-progress chunked uploads)
-        let filebox_tmp_dir = cache_dir_buf.join("filebox_tmp");
-        let mut tmp_size = 0_u64;
-        let mut dirs_to_visit = vec![filebox_tmp_dir];
-        while let Some(dir) = dirs_to_visit.pop() {
-            if let Ok(entries) = std::fs::read_dir(&dir) {
-                for entry in entries.flatten() {
-                    if let Ok(metadata) = entry.metadata() {
-                        if metadata.is_dir() {
-                            dirs_to_visit.push(entry.path());
-                        } else if metadata.is_file() {
-                            tmp_size += metadata.len();
-                        }
-                    }
-                }
-            }
-        }
-
-        proxy_cache_size + tmp_size
+        Ok(total)
     })
     .await
-    .unwrap_or(0);
-
-    filebox_size + disk_size
+    .map_err(std::io::Error::other)?
 }
 
-/// Get combined used size, using cached value or calculating if needed.
+pub async fn calculate_actual_usage(cache_dir: &Path, _db: &sqlx::SqlitePool) -> u64 {
+    calculate_payload_usage(cache_dir)
+        .await
+        .expect("failed to calculate initial storage usage")
+}
+
 pub async fn get_combined_used_size(
     cache_dir: &Path,
-    db: &sqlx::SqlitePool,
+    _db: &sqlx::SqlitePool,
     state: &AppState,
 ) -> u64 {
-    // Check if we need to recalibrate
     if state.cache_usage.should_recalibrate().await {
-        let actual = calculate_actual_usage(cache_dir, db).await;
-        state.cache_usage.set(actual);
-        state.cache_usage.mark_calibrated().await;
-        ::metrics::gauge!("yundo_cache_usage_bytes").set(actual as f64);
-        tracing::debug!("Cache usage recalibrated: {} bytes", actual);
-        actual
-    } else {
-        let usage = state.cache_usage.get();
-        ::metrics::gauge!("yundo_cache_usage_bytes").set(usage as f64);
-        usage
+        // Never overwrite reservations belonging to a live writer.
+        if let Ok(_idle) = state.cache_usage.operations.try_write() {
+            match calculate_payload_usage(cache_dir).await {
+                Ok(actual) => {
+                    state.cache_usage.set(actual);
+                    state.cache_usage.mark_calibrated().await;
+                }
+                Err(error) => tracing::warn!(%error, "storage calibration failed"),
+            }
+        }
     }
+    let usage = state.cache_usage.get();
+    ::metrics::gauge!("yundo_cache_usage_bytes").set(usage as f64);
+    usage
 }
 
 pub fn spawn_cache_eviction_task(state: Arc<AppState>) {
@@ -101,95 +87,45 @@ pub fn spawn_cache_eviction_task(state: Arc<AppState>) {
                         tracing::error!("cache eviction failed: {err}");
                     }
                 }
-                _ = shutdown_token.cancelled() => {
-                    tracing::info!("Cache eviction task shutting down");
-                    break;
-                }
+                _ = shutdown_token.cancelled() => break,
             }
         }
     });
 }
 
 pub(crate) async fn enforce_cache_size(state: &AppState) -> std::io::Result<()> {
-    let cache_dir_buf = state.cache_dir.to_path_buf();
-
-    // 1. Calculate proxy cache files size and gather their modified dates synchronously
-    let (mut files, proxy_cache_size) = tokio::task::spawn_blocking(move || {
-        let mut files = Vec::new();
-        let mut proxy_cache_size = 0_u64;
-        if let Ok(entries) = std::fs::read_dir(&cache_dir_buf) {
-            for entry in entries.flatten() {
-                if let Ok(metadata) = entry.metadata() {
-                    if metadata.is_file()
-                        && entry.path().extension().is_some_and(|ext| ext == "data")
-                    {
-                        let size = metadata.len();
-                        proxy_cache_size += size;
-                        let modified = metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
-                        files.push((entry.path(), size, modified));
-                    }
-                }
-            }
-        }
-        (files, proxy_cache_size)
-    })
-    .await
-    .unwrap_or((Vec::new(), 0));
-
-    // 2. Get active filebox files size from DB
-    let filebox_size = sqlx::query(
-        "SELECT COALESCE(SUM(file_size), 0) AS total_size FROM filebox_files WHERE expires_at >= datetime('now')"
-    )
-    .fetch_one(&state.db)
-    .await
-    .map(|row| row.get::<i64, _>("total_size") as u64)
-    .unwrap_or(0);
-
-    let mut total_size = proxy_cache_size + filebox_size;
-
-    // Update the atomic counter
-    state.cache_usage.set(total_size);
-    ::metrics::gauge!("yundo_cache_usage_bytes").set(total_size as f64);
-
-    if total_size <= state.max_cache_size {
+    let Ok(_idle) = state.cache_usage.operations.try_write() else {
         return Ok(());
+    };
+    let mut total_size = calculate_payload_usage(&state.cache_dir).await?;
+    state.cache_usage.set(total_size);
+    state.cache_usage.mark_calibrated().await;
+    let mut files = Vec::new();
+    let mut entries = fs::read_dir(&state.cache_dir).await?;
+    while let Some(entry) = entries.next_entry().await? {
+        if entry.file_type().await?.is_file()
+            && entry.path().extension().is_some_and(|ext| ext == "data")
+        {
+            let metadata = entry.metadata().await?;
+            files.push((
+                entry.path(),
+                metadata.len(),
+                metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH),
+            ));
+        }
     }
-    tracing::info!(
-        proxy_cache_size,
-        filebox_size,
-        total_size,
-        max_cache_size = state.max_cache_size,
-        "cache eviction started"
-    );
-
-    // 3. Sort files by modified time and evict oldest proxy cache files
     files.sort_by_key(|(_, _, modified)| *modified);
-
-    for (path, size, _) in &files {
+    for (path, size, _) in files {
         if total_size <= state.max_cache_size {
             break;
         }
-        // Remove the data file and its associated meta file together.
-        let meta_path = path.with_extension("meta");
-        if fs::remove_file(path).await.is_ok() {
-            total_size = total_size.saturating_sub(*size);
-            state.cache_usage.sub(*size);
-            ::metrics::gauge!("yundo_cache_usage_bytes").set(total_size as f64);
-            tracing::info!(
-                path = %path.display(),
-                size,
-                total_size,
-                "evicted proxy cache file"
-            );
+        if fs::remove_file(&path).await.is_ok() {
+            total_size = total_size.saturating_sub(size);
+            state.cache_usage.sub(size);
+            let _ = fs::remove_file(path.with_extension("meta")).await;
         }
-        let _ = fs::remove_file(&meta_path).await;
     }
-    tracing::info!(
-        total_size,
-        max_cache_size = state.max_cache_size,
-        "cache eviction finished"
-    );
-
+    ::metrics::gauge!("yundo_cache_usage_bytes").set(total_size as f64);
     Ok(())
 }
 
@@ -275,4 +211,51 @@ pub(crate) async fn try_serve_from_cache(
 
     let body = Body::from_stream(ReaderStream::new(file));
     Some((status, response_headers, body).into_response())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::{initialize_cache_dir, initialize_database, CacheUsageTracker};
+
+    #[tokio::test]
+    async fn eviction_counts_chunks_and_orphans_without_overwriting_live_reservations() {
+        let directory = tempfile::TempDir::new().unwrap();
+        initialize_cache_dir(directory.path()).await;
+        let state = AppState {
+            client: reqwest::Client::new(),
+            cache_dir: directory.path().to_path_buf(),
+            max_cache_size: 12,
+            max_file_size: 0,
+            filebox_size: 12,
+            db: initialize_database(directory.path()).await,
+            frontend_dist: directory.path().join("missing"),
+            base_path: "/".into(),
+            cache_usage: Arc::new(CacheUsageTracker::new()),
+            api_key: None,
+            metrics_handle: None,
+            shutdown_token: tokio_util::sync::CancellationToken::new(),
+        };
+        fs::write(directory.path().join("old.data"), b"abcdef")
+            .await
+            .unwrap();
+        fs::create_dir(directory.path().join("filebox_tmp/upload"))
+            .await
+            .unwrap();
+        fs::write(directory.path().join("filebox_tmp/upload/0"), b"12345678")
+            .await
+            .unwrap();
+        fs::write(directory.path().join("filebox/orphan"), b"abcd")
+            .await
+            .unwrap();
+        state.cache_usage.set(100);
+        let active = state.cache_usage.operations.read().await;
+        enforce_cache_size(&state).await.unwrap();
+        assert_eq!(state.cache_usage.get(), 100);
+        drop(active);
+        enforce_cache_size(&state).await.unwrap();
+        assert_eq!(state.cache_usage.get(), 12);
+        assert_eq!(calculate_payload_usage(directory.path()).await.unwrap(), 12);
+        assert!(!directory.path().join("old.data").exists());
+    }
 }

@@ -49,7 +49,8 @@ cargo build --release
 - `src/history/`: download history storage, seven-day event cleanup, ranking, and `/api/recent` response conversion.
 - `src/metrics.rs`: Prometheus recorder setup, `/metrics`, and HTTP request counters/histograms.
 - `src/middleware.rs`: optional API-key authentication for FileBox mutation routes.
-- `src/ssrf.rs`: hostname/IP-literal SSRF checks and an async DNS-check helper. The current proxy and remote-upload handlers use the hostname/IP-literal check directly; do not document DNS rebinding protection as an active request-path guarantee without changing those handlers.
+- `src/ssrf.rs`: URL/IP checks and the production HTTP client builder. Its DNS resolver validates the exact addresses handed to the connector; its redirect policy validates every target. Environment proxies are disabled. Tests may explicitly override DNS for isolated upstream servers.
+- `src/storage.rs`: staged files, quota reservations, publication, and cleanup on errors or cancellation.
 - `src/headers.rs`: allowed upstream headers and content-disposition/filename helpers.
 - `src/handlers.rs`: health, root fallback, and not-found responses.
 - `src/common.rs`: compatibility re-export facade for shared types and helpers.
@@ -74,18 +75,19 @@ Protected only when `--api-key` is configured:
 - `POST /api/filebox/remote-upload`
 - `DELETE /api/filebox/delete/:id`
 
-Authentication accepts `Authorization: Bearer <key>`, a plain `Authorization` value, or `X-API-Key: <key>`. The bundled frontend does not currently add these headers automatically.
+Authentication accepts `Authorization: Bearer <key>`, a plain `Authorization` value, or `X-API-Key: <key>`. The bundled frontend offers an API key field when authentication is enabled and stores it in sessionStorage, scoped to the base path.
 
 The frontend routes are `/`, `/filebox`, `/privacy`, and `/terms`. It uses the runtime base path injected by the backend and calls the API through that prefix.
 
 ## Important behavior
 
-- `--cache-size` is the shared limit for proxy `.data` files, active FileBox files, and temporary chunk files. `--filebox-size` is still parsed for CLI compatibility but is not used as a separate quota.
-- `--max-file-size` defaults to `0` (unlimited). Direct and remote uploads check the configured limit; chunk uploads check each chunk, while the merge endpoint combines the already accepted chunks.
+- `--cache-size` is the shared limit for proxy payloads, all FileBox payloads on disk (including expired/orphaned files), and temporary chunks/output. `--filebox-size` is still parsed for CLI compatibility but is not used as a separate quota.
+- `--max-file-size` defaults to `0` (unlimited). Direct and remote uploads, individual chunks, and the total merged file check the configured limit. Chunk bodies are streamed and capped at 72 MiB; JSON bodies are capped at 64 KiB.
 - Full successful proxy responses are cached using paired `.data` and `.meta` files. `Range` proxy requests bypass the cache. FileBox downloads support byte ranges and return `206`/`416` as appropriate.
 - FileBox metadata is stored in `proxy.db`; files expire after seven days and are removed by a background task.
-- The cache usage counter is recalibrated from disk/database state periodically. Cache eviction removes oldest proxy cache files; it does not evict active FileBox files.
-- Startup removes top-level `*.tmp` files. Abandoned chunk directories are cleaned up by the FileBox background task.
+- Every payload write reserves quota atomically, including temporary output during merges. Merge requires space for source chunks plus the assembled file. Failed writes release quota after cleanup; duplicates return 409. Proxy cache failures leave the forwarded download running.
+- Disk reconciliation includes expired/orphaned FileBox files and temporary chunks, and only runs when no writer holds the storage operation guard. Cache eviction removes oldest proxy cache files; it does not evict active FileBox files.
+- Startup removes staged `*.tmp` files at the cache root and in filebox/filebox_tmp. Abandoned chunk directories are cleaned up by the FileBox background task.
 - CORS is permissive (`CorsLayer::permissive()`). Any deployment that needs origin restrictions must add an explicit policy.
 
 ## Configuration examples

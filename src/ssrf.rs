@@ -1,205 +1,147 @@
-/// Enhanced SSRF protection with DNS resolution checking.
-use hickory_resolver::{
-    config::{ResolverConfig, ResolverOpts},
-    TokioAsyncResolver,
+//! Validate the addresses used by the HTTP connector, including redirect targets.
+use reqwest::{
+    dns::{Addrs, Name, Resolve, Resolving},
+    ClientBuilder,
 };
-use std::net::IpAddr;
+use std::{
+    net::{IpAddr, SocketAddr},
+    sync::Arc,
+    time::Duration,
+};
 use url::Url;
 
-/// Validates a URL and checks for SSRF vulnerabilities.
-/// Returns Ok(()) if the URL is safe, Err with a message otherwise.
-pub async fn validate_url_safe(url: &Url) -> Result<(), &'static str> {
-    // Check scheme
+const FORBIDDEN: &str = "access to local or private networks is forbidden";
+
+pub fn safe_client_builder() -> ClientBuilder {
+    reqwest::Client::builder()
+        // Environment proxies resolve/connect outside our DNS filter.
+        .no_proxy()
+        .timeout(Duration::from_secs(
+            crate::constants::PROXY_CLIENT_TIMEOUT_SECS,
+        ))
+        .dns_resolver(Arc::new(SafeResolver(SystemResolver)))
+        .redirect(reqwest::redirect::Policy::custom(|attempt| {
+            if attempt.previous().len() >= crate::constants::MAX_REDIRECTS {
+                attempt.error("too many redirects")
+            } else if validate_url_host(attempt.url()).is_err() {
+                attempt.error(FORBIDDEN)
+            } else {
+                attempt.follow()
+            }
+        }))
+}
+
+pub fn validate_url_host(url: &Url) -> Result<(), &'static str> {
     if !matches!(url.scheme(), "http" | "https") {
         return Err("only HTTP and HTTPS URLs are supported");
     }
-
-    let host = url.host_str().unwrap_or_default();
-    if host.is_empty() {
-        return Err("invalid URL: missing host");
-    }
-
-    // First check: hostname-based blocking
+    let host = url
+        .host_str()
+        .filter(|host| !host.is_empty())
+        .ok_or("invalid URL: missing host")?;
     if is_forbidden_hostname(host) {
-        return Err("access to local or private networks is forbidden");
+        return Err(FORBIDDEN);
     }
-
-    // Second check: resolve DNS and check IP addresses
-    if let Err(e) = check_resolved_ips(host).await {
-        return Err(e);
-    }
-
     Ok(())
 }
 
-/// Checks if a hostname is forbidden (localhost, private ranges by name).
-pub fn is_forbidden_hostname(host: &str) -> bool {
-    let lower = host.to_ascii_lowercase();
-
-    // Localhost variants
-    if lower == "localhost" || lower == "localhost.localdomain" || lower.ends_with(".localhost") {
-        return true;
-    }
-
-    // IPv6 loopback
-    if lower == "::1" || lower == "[::1]" {
-        return true;
-    }
-
-    // IPv4 loopback and private ranges
-    if lower == "0.0.0.0" || lower == "127.0.0.1" {
-        return true;
-    }
-
-    // Check if it's an IP address string
-    if let Ok(ip) = lower
-        .trim_matches(|c| c == '[' || c == ']')
-        .parse::<IpAddr>()
-    {
-        return is_forbidden_ip(&ip);
-    }
-
-    // Private IP ranges by string prefix (for non-parsed IPs)
-    if lower.starts_with("10.") || lower.starts_with("192.168.") || is_172_private_range(&lower) {
-        return true;
-    }
-
-    // Link-local addresses
-    if lower.starts_with("169.254.") {
-        return true;
-    }
-
-    // Internal/special domains
-    if lower.ends_with(".local")
-        || lower.ends_with(".internal")
-        || lower.ends_with(".corp")
-        || lower == "metadata.google.internal"
-    {
-        return true;
-    }
-
-    false
-}
-
-/// Checks if an IP address is forbidden (loopback, private, link-local, etc.).
-pub fn is_forbidden_ip(ip: &IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(ipv4) => {
-            let octets = ipv4.octets();
-
-            // Loopback: 127.0.0.0/8
-            if octets[0] == 127 {
-                return true;
-            }
-
-            // Private: 10.0.0.0/8
-            if octets[0] == 10 {
-                return true;
-            }
-
-            // Private: 172.16.0.0/12
-            if octets[0] == 172 && (16..=31).contains(&octets[1]) {
-                return true;
-            }
-
-            // Private: 192.168.0.0/16
-            if octets[0] == 192 && octets[1] == 168 {
-                return true;
-            }
-
-            // Link-local: 169.254.0.0/16
-            if octets[0] == 169 && octets[1] == 254 {
-                return true;
-            }
-
-            // Broadcast: 255.255.255.255
-            if octets == [255, 255, 255, 255] {
-                return true;
-            }
-
-            // This network: 0.0.0.0/8
-            if octets[0] == 0 {
-                return true;
-            }
-
-            false
-        }
-        IpAddr::V6(ipv6) => {
-            // Loopback: ::1
-            if ipv6.is_loopback() {
-                return true;
-            }
-
-            // Unspecified: ::
-            if ipv6.is_unspecified() {
-                return true;
-            }
-
-            let segments = ipv6.segments();
-
-            // Link-local: fe80::/10
-            if segments[0] & 0xffc0 == 0xfe80 {
-                return true;
-            }
-
-            // Unique local: fc00::/7
-            if segments[0] & 0xfe00 == 0xfc00 {
-                return true;
-            }
-
-            false
-        }
-    }
-}
-
-/// Resolves a hostname and checks if any resolved IP is forbidden.
-async fn check_resolved_ips(host: &str) -> Result<(), &'static str> {
-    // Skip resolution for IP addresses (already checked)
+pub async fn validate_url_safe(url: &Url) -> Result<(), &'static str> {
+    validate_url_host(url)?;
+    let host = url.host_str().unwrap().trim_matches(['[', ']']);
     if host.parse::<IpAddr>().is_ok() {
         return Ok(());
     }
-
-    // Create resolver
-    let resolver = TokioAsyncResolver::tokio(ResolverConfig::default(), ResolverOpts::default());
-
-    // Resolve hostname
-    let lookup = match resolver.lookup_ip(host).await {
-        Ok(lookup) => lookup,
-        Err(e) => {
-            tracing::warn!("DNS resolution failed for {}: {}", host, e);
-            // Allow the request to proceed - the upstream connection will fail naturally
-            return Ok(());
-        }
-    };
-
-    // Check all resolved IPs
-    for ip in lookup.iter() {
-        if is_forbidden_ip(&ip) {
-            tracing::warn!(
-                "Blocked SSRF attempt: {} resolves to forbidden IP {}",
-                host,
-                ip
-            );
-            return Err("access to local or private networks is forbidden");
-        }
-    }
-
-    Ok(())
+    let addresses = tokio::net::lookup_host((host, 0))
+        .await
+        .map_err(|_| "DNS resolution failed")?;
+    validate_addresses(addresses.collect())
+        .map(|_| ())
+        .map_err(|_| FORBIDDEN)
 }
 
-fn is_172_private_range(host: &str) -> bool {
-    let Some(rest) = host.strip_prefix("172.") else {
-        return false;
-    };
+struct SystemResolver;
 
-    let Some(second_octet) = rest.split('.').next() else {
-        return false;
-    };
+impl Resolve for SystemResolver {
+    fn resolve(&self, name: Name) -> Resolving {
+        Box::pin(async move {
+            let addresses = tokio::net::lookup_host((name.as_str(), 0)).await?;
+            Ok(Box::new(addresses.collect::<Vec<_>>().into_iter()) as Addrs)
+        })
+    }
+}
 
-    second_octet
-        .parse::<u8>()
-        .map(|octet| (16..=31).contains(&octet))
-        .unwrap_or(false)
+struct SafeResolver<R>(R);
+
+impl<R: Resolve> Resolve for SafeResolver<R> {
+    fn resolve(&self, name: Name) -> Resolving {
+        let lookup = self.0.resolve(name);
+        Box::pin(async move {
+            let addresses = validate_addresses(lookup.await?.collect())?;
+            // The connector uses these exact addresses, without a second lookup.
+            Ok(Box::new(addresses.into_iter()) as Addrs)
+        })
+    }
+}
+
+fn validate_addresses(addresses: Vec<SocketAddr>) -> std::io::Result<Vec<SocketAddr>> {
+    if addresses.is_empty()
+        || addresses
+            .iter()
+            .any(|address| is_forbidden_ip(&address.ip()))
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            FORBIDDEN,
+        ));
+    }
+    Ok(addresses)
+}
+
+pub fn is_forbidden_hostname(host: &str) -> bool {
+    let lower = host
+        .trim_matches(['[', ']'])
+        .trim_end_matches('.')
+        .to_ascii_lowercase();
+    if let Ok(ip) = lower.parse::<IpAddr>() {
+        return is_forbidden_ip(&ip);
+    }
+    lower == "localhost"
+        || lower == "localhost.localdomain"
+        || [".localhost", ".local", ".internal", ".corp"]
+            .iter()
+            .any(|suffix| lower.ends_with(suffix))
+}
+
+pub fn is_forbidden_ip(ip: &IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ip) => {
+            let octets = ip.octets();
+            ip.is_loopback()
+                || ip.is_private()
+                || ip.is_link_local()
+                || ip.is_unspecified()
+                || ip.is_broadcast()
+                || ip.is_documentation()
+                || ip.is_multicast()
+                || octets[0] == 0
+                || octets[0] >= 240
+                || (octets[0] == 100 && (64..=127).contains(&octets[1]))
+                || (octets[0] == 198 && (18..=19).contains(&octets[1]))
+                || (octets[0] == 192 && octets[1] == 0 && octets[2] == 0)
+        }
+        IpAddr::V6(ip) => {
+            if let Some(ipv4) = ip.to_ipv4() {
+                return is_forbidden_ip(&IpAddr::V4(ipv4));
+            }
+            let segments = ip.segments();
+            ip.is_loopback()
+                || ip.is_unspecified()
+                || ip.is_multicast()
+                || segments[0] & 0xffc0 == 0xfe80
+                || segments[0] & 0xfe00 == 0xfc00
+                || (segments[0] == 0x2001 && segments[1] == 0x0db8)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -207,31 +149,70 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_forbidden_hostnames() {
-        assert!(is_forbidden_hostname("localhost"));
-        assert!(is_forbidden_hostname("127.0.0.1"));
-        assert!(is_forbidden_hostname("::1"));
-        assert!(is_forbidden_hostname("10.0.0.1"));
-        assert!(is_forbidden_hostname("192.168.1.1"));
-        assert!(is_forbidden_hostname("172.16.0.1"));
-        assert!(is_forbidden_hostname("169.254.1.1"));
-        assert!(is_forbidden_hostname("test.local"));
-
+    fn blocks_local_names_and_encoded_private_addresses() {
+        for host in [
+            "localhost",
+            "localhost.",
+            "test.localhost.",
+            "test.local",
+            "metadata.google.internal",
+            "127.0.0.1",
+            "10.0.0.1",
+            "192.168.1.1",
+            "172.16.0.1",
+            "169.254.1.1",
+            "::1",
+            "[::ffff:127.0.0.1]",
+            "[::ffff:192.168.1.1]",
+        ] {
+            assert!(is_forbidden_hostname(host), "{host}");
+        }
         assert!(!is_forbidden_hostname("example.com"));
         assert!(!is_forbidden_hostname("8.8.8.8"));
     }
 
     #[test]
-    fn test_forbidden_ips() {
-        assert!(is_forbidden_ip(&"127.0.0.1".parse().unwrap()));
-        assert!(is_forbidden_ip(&"10.0.0.1".parse().unwrap()));
-        assert!(is_forbidden_ip(&"192.168.1.1".parse().unwrap()));
-        assert!(is_forbidden_ip(&"172.16.0.1".parse().unwrap()));
-        assert!(is_forbidden_ip(&"169.254.1.1".parse().unwrap()));
-        assert!(is_forbidden_ip(&"::1".parse().unwrap()));
-        assert!(is_forbidden_ip(&"fe80::1".parse().unwrap()));
+    fn rejects_mixed_or_empty_dns_answers() {
+        let public = "8.8.8.8:443".parse().unwrap();
+        assert!(validate_addresses(vec![public]).is_ok());
+        assert!(validate_addresses(vec![]).is_err());
+        for private in [
+            "127.0.0.1:80",
+            "10.0.0.1:80",
+            "[::1]:80",
+            "[::ffff:127.0.0.1]:80",
+            "100.64.0.1:80",
+        ] {
+            assert!(validate_addresses(vec![public, private.parse().unwrap()]).is_err());
+        }
+    }
 
-        assert!(!is_forbidden_ip(&"8.8.8.8".parse().unwrap()));
-        assert!(!is_forbidden_ip(&"1.1.1.1".parse().unwrap()));
+    #[tokio::test]
+    async fn connector_rejects_private_dns_answers() {
+        struct LocalResolver;
+        impl Resolve for LocalResolver {
+            fn resolve(&self, _: Name) -> Resolving {
+                Box::pin(async {
+                    Ok(
+                        Box::new(vec!["127.0.0.1:80".parse::<SocketAddr>().unwrap()].into_iter())
+                            as Addrs,
+                    )
+                })
+            }
+        }
+        let client = safe_client_builder()
+            .dns_resolver(Arc::new(SafeResolver(LocalResolver)))
+            .build()
+            .unwrap();
+        let error = client
+            .get("http://upstream.test/file")
+            .send()
+            .await
+            .unwrap_err();
+        let mut source: &dyn std::error::Error = &error;
+        while let Some(next) = source.source() {
+            source = next;
+        }
+        assert!(source.to_string().contains(FORBIDDEN));
     }
 }
